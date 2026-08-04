@@ -1,0 +1,9 @@
+"use client";
+import { FormEvent, useState } from "react";
+
+export function EmployeeRecoveryForm() {
+  const [error, setError] = useState(""); const [busy, setBusy] = useState(false); const [complete, setComplete] = useState(false);
+  async function submit(event: FormEvent<HTMLFormElement>) { event.preventDefault(); setBusy(true); setError(""); const form = new FormData(event.currentTarget); const response = await fetch("/api/session/recover-employee", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: form.get("email"), companyCode: form.get("companyCode"), password: form.get("password"), confirmPassword: form.get("confirmPassword") }) }).catch(() => null); if (!response?.ok) { const result = response ? await response.json().catch(() => null) as { error?: string } | null : null; setError(result?.error ?? "Unable to reset the password."); setBusy(false); return; } setComplete(true); window.setTimeout(() => window.location.replace("/login"), 1200); }
+  if (complete) return <div className="recovery-success" role="status"><span>✓</span><strong>Password updated</strong><p>Returning you to the secure sign-in screen…</p></div>;
+  return <form className="login-form recovery-form" onSubmit={submit}><label>Work email<input name="email" type="email" autoComplete="email" placeholder="you@example.com" required /></label><label>8-digit company code<input name="companyCode" inputMode="numeric" pattern="[0-9]{8}" maxLength={8} placeholder="12345678" required /></label><label>New password<input name="password" type="password" minLength={10} autoComplete="new-password" required /></label><label>Confirm new password<input name="confirmPassword" type="password" minLength={10} autoComplete="new-password" required /></label>{error && <p className="login-error" role="alert">{error}</p>}<button className="login-submit" type="submit" disabled={busy}>{busy ? "Securing account…" : "Reset password"}</button></form>;
+}

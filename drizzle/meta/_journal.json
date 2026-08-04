@@ -1,0 +1,125 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1784928000000,
+      "tag": "0000_hourmark",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784929320000,
+      "tag": "0001_employee_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784930100000,
+      "tag": "0002_hourly_rates",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784931000000,
+      "tag": "0003_login_access",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784931900000,
+      "tag": "0004_remove_sample_data",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784932500000,
+      "tag": "0005_reset_employee_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1784933400000,
+      "tag": "0006_multiple_owners",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1784938312030,
+      "tag": "0007_dizzy_ravenous",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1784938631429,
+      "tag": "0008_high_betty_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1784938675198,
+      "tag": "0009_silly_the_professor",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1784939511000,
+      "tag": "0010_wipe_all_data",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1784945865007,
+      "tag": "0011_cheerful_colossus",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1784948009975,
+      "tag": "0012_illegal_iron_lad",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "6",
+      "when": 1784948282855,
+      "tag": "0013_productive_lionheart",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1784950457753,
+      "tag": "0014_public_demo_account",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1784952900000,
+      "tag": "0015_rebrand_coreshift",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "6",
+      "when": 1784953200000,
+      "tag": "0016_coreshift_demo_password",
+      "breakpoints": true
+    }
+  ]
+}
