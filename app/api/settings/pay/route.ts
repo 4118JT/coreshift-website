@@ -15,6 +15,18 @@ const defaults = {
   notify: true,
   differentRates: true,
   individualRates: true,
+  payPeriodStarts: "Sunday",
+  currency: "USD ($)",
+  timeZone: "Central Time (CT)",
+  doubleTimeThreshold: "12",
+  overtimeEnabled: true,
+  overtimeDisabled: false,
+  overtimeApplies: "all",
+  approvalMode: "Manager approval required",
+  eligibility: "hourly",
+  holidayPay: "2x",
+  weekendPremium: "None",
+  nightShiftDifferential: "$2.00 / hr",
 };
 
 const key = (businessId: string) => `pay_settings:${businessId}`;
@@ -41,6 +53,13 @@ export async function PATCH(request: Request) {
   const allowed = new Set(Object.keys(defaults));
   const updates = Object.fromEntries(Object.entries(body.settings).filter(([name, value]) => allowed.has(name) && (typeof value === "string" || typeof value === "boolean")));
   const settings = { ...defaults, ...stored, ...updates };
+  if (String(settings.payPeriod).startsWith("Biweekly") || settings.frequency === "Biweekly") {
+    settings.frequency = "Biweekly";
+    settings.payPeriod = "Biweekly (Sunday - Saturday)";
+  } else if (String(settings.payPeriod).startsWith("Weekly") || settings.frequency === "Weekly") {
+    settings.frequency = "Weekly";
+    settings.payPeriod = "Weekly (Sunday - Saturday)";
+  }
   await database().prepare("INSERT INTO workspace_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(key(viewer.businessId), JSON.stringify(settings)).run();
   return Response.json({ settings });
 }

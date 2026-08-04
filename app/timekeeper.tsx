@@ -4,6 +4,8 @@ import Link from "next/link";
 import { Component, ErrorInfo, ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { Viewer } from "../db/viewer";
 import "./messages-motion.css";
+import PersistentPayOvertimeSettingsPage from "./pay-overtime-settings";
+import PersistentPayHistoryView from "./pay-history-view";
 
 declare global {
   interface Window {
@@ -1027,39 +1029,105 @@ function PlaidConnectCard({ flash }: { flash: (message: string) => void }) {
   return <article className="panel plaid-card"><div><span className="payroll-icon green">$</span><div><h2>Bank connection</h2><p>{status === "connected" ? `${institution || "Bank account"} connected through Plaid` : "Connect a bank account to prepare secure payroll payouts."}</p></div></div>{status === "connected" ? <button className="secondary-button" type="button" disabled={busy} onClick={disconnect}>Disconnect</button> : <button className="primary-button" type="button" disabled={busy || status === "loading"} onClick={connect}>{busy ? "Connecting…" : "Connect bank account"}</button>}<small>Plaid keeps your bank credentials in its secure connection flow. CoreShift never receives your bank password.</small></article>;
 }
 
+function payrollPeriodFor(date: Date, settings: { frequency: string; payPeriodStarts: string }) {
+  const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const configuredStartDay = Math.max(0, weekdayNames.indexOf(settings.payPeriodStarts));
+  const start = new Date(date);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - ((start.getDay() - configuredStartDay + 7) % 7));
+  const days = settings.frequency === "Biweekly" ? 14 : 7;
+  if (days === 14) start.setDate(start.getDate() - 7);
+  return { start: start.getTime(), end: addDays(start, days).getTime() - 1, days };
+}
+
 function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (message: string) => void }) {
   const [tab, setTab] = useState("Run Payroll");
   const [query, setQuery] = useState("");
   const [paidIds, setPaidIds] = useState<number[]>([]);
+  const persistedPaidIds = useRef<Set<number>>(new Set());
+  const [paySchedule, setPaySchedule] = useState({ frequency: "Weekly", payDay: "Friday", payPeriodStarts: "Sunday" });
+  const payrollPeriod = payrollPeriodFor(new Date(), paySchedule);
+  const [periodEmployeeReport, setPeriodEmployeeReport] = useState<Record<number, { minutes: number; hourlyRateCents: number; paidCents: number }>>({});
   useEffect(() => {
-    try {
-      const saved = JSON.parse(window.localStorage.getItem("coreshift-payroll-paid") ?? "[]") as number[];
-      if (Array.isArray(saved)) setPaidIds(saved.filter((id) => Number.isFinite(id)));
-    } catch { /* use an empty paid list */ }
+    fetch("/api/settings/pay", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((payload: { settings?: { frequency?: string; payPeriod?: string; payDay?: string; payPeriodStarts?: string } }) => {
+        if (!payload.settings) return;
+        const storedPeriod = payload.settings.payPeriod || "";
+        const frequency = storedPeriod.startsWith("Biweekly") || payload.settings.frequency === "Biweekly"
+          ? "Biweekly"
+          : storedPeriod.startsWith("Weekly")
+            ? "Weekly"
+            : payload.settings.frequency || "Weekly";
+        setPaySchedule((current) => ({
+          frequency,
+          payDay: payload.settings?.payDay || current.payDay,
+          payPeriodStarts: payload.settings?.payPeriodStarts || current.payPeriodStarts,
+        }));
+      })
+      .catch(() => {});
   }, []);
+  useEffect(() => {
+    const start = payrollPeriod.start;
+    const end = payrollPeriod.end;
+    const params = new URLSearchParams({ range: "custom", dayStart: String(start), weekStart: String(start), monthStart: String(start), yearStart: String(start), periodStart: String(start), periodEnd: String(end) });
+    fetch(`/api/reports/expenses?${params}`, { cache: "no-store" }).then((response) => response.ok ? response.json() : Promise.reject()).then((payload: { selected?: { employeeReport?: Array<{ id: number; minutes: number; hourlyRateCents: number; paidCents: number }> } }) => {
+      const report = payload.selected?.employeeReport ?? [];
+      const paid = report.filter((row) => row.paidCents > 0).map((row) => row.id);
+      persistedPaidIds.current = new Set(paid);
+      setPaidIds(paid);
+      setPeriodEmployeeReport(Object.fromEntries(report.map((row) => [row.id, row])));
+    }).catch(() => {});
+  }, [payrollPeriod.start, payrollPeriod.end]);
   function setPaid(employeeId: number, employeeName: string) {
     setPaidIds((current) => {
-      const next = current.includes(employeeId) ? current.filter((id) => id !== employeeId) : [...current, employeeId];
-      window.localStorage.setItem("coreshift-payroll-paid", JSON.stringify(next));
-      flash(next.includes(employeeId) ? `${employeeName} marked as paid.` : `${employeeName} marked unpaid.`);
+      if (current.includes(employeeId)) { flash(`${employeeName}'s payment is already recorded.`); return current; }
+      const next = [...current, employeeId];
+      flash(`${employeeName} marked as paid.`);
       return next;
     });
   }
   const rows = employees.filter((employee) => employee.name.toLowerCase().includes(query.toLowerCase())).map((employee) => {
-    const regularMinutes = employee.weeklyMinutes;
-    const overtimeMinutes = Math.max(0, regularMinutes - 2400);
-    const rate = employee.hourlyRateCents ?? 0;
-    const totalMinutes = regularMinutes + overtimeMinutes;
+    const reportRow = periodEmployeeReport[employee.id];
+    const totalMinutes = reportRow?.minutes ?? employee.weeklyMinutes;
+    const regularMinutes = Math.min(totalMinutes, payrollPeriod.days === 14 ? 4800 : 2400);
+    const overtimeMinutes = Math.max(0, totalMinutes - regularMinutes);
+    const rate = reportRow?.hourlyRateCents ?? employee.hourlyRateCents ?? 0;
     return { employee, regularMinutes, overtimeMinutes, totalMinutes, estimatedCents: Math.round((regularMinutes / 60) * rate + (overtimeMinutes / 60) * rate * 1.5) };
   });
   const totalRegular = rows.reduce((sum, row) => sum + row.regularMinutes, 0);
   const totalOvertime = rows.reduce((sum, row) => sum + row.overtimeMinutes, 0);
   const estimatedCost = rows.reduce((sum, row) => sum + row.estimatedCents, 0);
   const paidRows = rows.filter((row) => paidIds.includes(row.employee.id));
+  useEffect(() => {
+    const newlyPaid = paidIds.filter((id) => !persistedPaidIds.current.has(id));
+    if (!newlyPaid.length) return;
+    const periodStart = payrollPeriod.start;
+    const periodEnd = payrollPeriod.end;
+    const payments = newlyPaid.map((id) => rows.find((row) => row.employee.id === id)).filter((row): row is NonNullable<typeof row> => !!row && row.estimatedCents > 0).map((row) => ({ employeeId: row.employee.id, amountCents: row.estimatedCents }));
+    if (!payments.length) return;
+    newlyPaid.forEach((id) => persistedPaidIds.current.add(id));
+    fetch("/api/payroll/payments", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ payments, paidAt: Date.now(), periodStart, periodEnd }) })
+      .then(async (response) => { const payload = await response.json().catch(() => null) as { error?: string } | null; if (!response.ok) throw new Error(payload?.error ?? "Payroll payments could not be recorded."); })
+      .catch((reason: Error) => { newlyPaid.forEach((id) => persistedPaidIds.current.delete(id)); setPaidIds((current) => current.filter((id) => !newlyPaid.includes(id))); flash(reason.message); });
+  }, [paidIds, payrollPeriod.start, payrollPeriod.end]);
   const money = (cents: number) => (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
-  const payrollStart = weekStartForDate(new Date());
-  const payrollEnd = addDays(payrollStart, 6);
+  const payrollStart = new Date(payrollPeriod.start);
+  const payrollEnd = new Date(payrollPeriod.end);
   const currentPayPeriod = formatDateRange(payrollStart, payrollEnd, true);
+  const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const configuredPayDay = Math.max(0, weekdayNames.indexOf(paySchedule.payDay));
+  const scheduleLengthDays = payrollPeriod.days;
+  const upcomingPayrolls = Array.from({ length: 3 }, (_, index) => {
+    const start = addDays(payrollEnd, 1 + index * scheduleLengthDays);
+    const end = addDays(start, scheduleLengthDays - 1);
+    const payDate = addDays(end, 1);
+    payDate.setDate(payDate.getDate() + ((configuredPayDay - payDate.getDay() + 7) % 7));
+    return {
+      label: formatDateRange(start, end, true),
+      payDate: payDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" }),
+    };
+  });
   const tabs = ["Run Payroll", "Pay History", "Employees", "Tax Documents", "Settings"];
   function downloadPayHistory() {
     const header = ["Pay period", "Employee", "Role", "Hours", "Overtime hours", "Pay rate", "Amount", "Status"];
@@ -1069,7 +1137,7 @@ function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (mess
     const link = document.createElement("a"); link.href = url; link.download = `coreshift-pay-history-${new Date().toISOString().slice(0, 10)}.csv`; link.click(); URL.revokeObjectURL(url);
     flash("Pay history downloaded.");
   }
-  const payHistory = tab === "Pay History" ? <PayHistoryView currentPayPeriod={currentPayPeriod} rows={rows} estimatedCost={estimatedCost} paidRows={paidRows} money={money} onDownload={downloadPayHistory} /> : null;
+  const payHistory = tab === "Pay History" ? <PersistentPayHistoryView currentPayPeriod={currentPayPeriod} currentPeriodStart={payrollPeriod.start} periodDays={payrollPeriod.days} payFrequency={paySchedule.frequency} currentRows={rows} currentEstimatedCost={estimatedCost} currentPaidIds={paidIds} money={money} flash={flash} /> : null;
   if (tab === "Employees") return <section className="payroll-page"><div className="payroll-tabs">{tabs.map((item) => <button key={item} type="button" className={tab === item ? "active" : ""} onClick={() => { setTab(item); flash(`${item} opened.`); }}>{item}</button>)}</div><PayrollEmployeesView rows={rows} money={money} onDownload={downloadPayHistory} /></section>;
   if (tab === "Pay History") return <section className="payroll-page"><div className="payroll-tabs">{tabs.map((item) => <button key={item} type="button" className={tab === item ? "active" : ""} onClick={() => { setTab(item); flash(`${item} opened.`); }}>{item}</button>)}</div>{payHistory}</section>;
   return <section className="payroll-page">
@@ -1077,15 +1145,15 @@ function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (mess
     {payHistory}
     {tab !== "Pay History" && <>
     <div className="payroll-kpis">
-      <article className="panel payroll-kpi"><span className="payroll-icon purple">▣</span><small>Current Payroll Period</small><strong>{currentPayPeriod}</strong><em>Weekly payroll</em><button className="primary-button" type="button" onClick={() => flash("Payroll run started.")}>Run Payroll</button></article>
-      <article className="panel payroll-kpi"><span className="payroll-icon green">$</span><small>Pay Period</small><strong>{currentPayPeriod}</strong><em>7 days</em><button className="text-button" type="button" onClick={() => flash("Pay period details opened.")}>View pay period details →</button></article>
+      <article className="panel payroll-kpi"><span className="payroll-icon purple">▣</span><small>Current Payroll Period</small><strong>{currentPayPeriod}</strong><em>{paySchedule.frequency} payroll</em><button className="primary-button" type="button" onClick={() => flash("Payroll run started.")}>Run Payroll</button></article>
+      <article className="panel payroll-kpi"><span className="payroll-icon green">$</span><small>Pay Period</small><strong>{currentPayPeriod}</strong><em>{payrollPeriod.days} days</em><button className="text-button" type="button" onClick={() => flash("Pay period details opened.")}>View pay period details →</button></article>
       <article className="panel payroll-kpi"><span className="payroll-icon blue">♙</span><small>Employees Paid</small><strong>{paidRows.length} / {rows.length}</strong><em>Marked paid this period</em><button className="text-button" type="button" onClick={() => flash("Employee payroll list opened.")}>View all employees →</button></article>
       <article className="panel payroll-kpi"><span className="payroll-icon orange">▣</span><small>Est. Payroll Cost</small><strong>{money(estimatedCost)}</strong><em>Based on recorded hours</em><button className="text-button" type="button" onClick={() => flash("Cost breakdown opened.")}>View cost breakdown →</button></article>
     </div>
     <PlaidConnectCard flash={flash} />
     <div className="payroll-layout">
       <article className="panel payroll-employees"><div className="payroll-section-head"><div><h2>Employees in This Payroll ({rows.length})</h2></div><div className="payroll-head-actions"><button className="secondary-button" type="button" onClick={() => flash("Payroll editor opened.")}>✎ Edit payroll</button><button className="primary-button" type="button" onClick={() => { const ids = rows.map((row) => row.employee.id); setPaidIds(ids); window.localStorage.setItem("coreshift-payroll-paid", JSON.stringify(ids)); flash("Payroll approved and all employees marked paid."); }}>＋ Approve &amp; Pay</button></div></div><div className="payroll-filter-row"><label className="documents-search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search employees..." /></label><select defaultValue="All Departments"><option>All Departments</option><option>Operations</option><option>Front of House</option></select><select defaultValue="All Employment Types"><option>All Employment Types</option><option>Hourly</option><option>Salaried</option></select><button className="secondary-button" type="button" onClick={() => flash("Payroll filters opened.")}>☷ Filters</button></div><div className="payroll-table payroll-table-head"><span>Employee</span><span>Pay Rate</span><span>Regular Hours</span><span>Overtime Hours</span><span>Total Hours</span><span>Est. Pay</span><span>Status</span></div>{rows.map((row) => { const paid = paidIds.includes(row.employee.id); return <div className="payroll-table" key={row.employee.id}><div className="payroll-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><span>{formatHours(row.regularMinutes)}</span><span>{formatHours(row.overtimeMinutes)}</span><span>{formatHours(row.totalMinutes)}</span><strong>{money(row.estimatedCents)}</strong><button className={`payroll-status ${paid ? "paid" : ""}`} type="button" onClick={() => setPaid(row.employee.id, row.employee.name)}>{paid ? "Paid" : "Mark paid"}</button></div>; })}{!rows.length && <EmptyState title="No payroll employees" message="Employees and recorded hours will appear here." />}<div className="payroll-table-footer">Showing {rows.length} employees <span>‹　<b>1</b>　›</span></div></article>
-      <aside className="payroll-side"><article className="panel payroll-summary-card"><div className="panel-head"><div><h2>Payroll Summary</h2></div><button className="text-button" type="button" onClick={() => flash("Payroll breakdown opened.")}>View full breakdown →</button></div><dl><div><dt>Total Regular Hours</dt><dd>{formatHours(totalRegular)}</dd></div><div><dt>Total Overtime Hours</dt><dd>{formatHours(totalOvertime)}</dd></div><div><dt>Gross Payroll</dt><dd>{money(estimatedCost)}</dd></div><div><dt>Employee Taxes (Est.)</dt><dd>—</dd></div><div><dt>Employer Taxes (Est.)</dt><dd>—</dd></div><div className="payroll-total"><dt>Total Payroll Cost</dt><dd>{money(estimatedCost)}</dd></div></dl><div className="payroll-donut" /><div className="payroll-key"><span><i className="purple" />Gross wages <b>{money(estimatedCost)}</b></span><span><i className="blue" />Employee taxes <b>—</b></span><span><i className="green" />Employer taxes <b>—</b></span></div></article><article className="panel upcoming-payroll"><div className="panel-head"><h2>Upcoming Payroll</h2></div>{["May 31 – Jun 6, 2024", "Jun 7 – Jun 13, 2024", "Jun 14 – Jun 20, 2024"].map((period, index) => <button type="button" key={period} onClick={() => flash(`${period} opened.`)}><span>▣</span><div><strong>{period} <em>Weekly</em></strong><small>Pay Date: Friday, {index === 0 ? "June 7" : index === 1 ? "June 14" : "June 21"}</small></div><b>{index === 0 ? money(estimatedCost) : "$0.00"}　›</b></button>)}<button className="text-button" type="button" onClick={() => flash("All payrolls opened.")}>View all payrolls →</button></article><article className="panel payroll-shortcuts"><h2>Payroll Shortcuts</h2><div>{["Add Bonus", "Reimburse Employee", "Manage Deductions", "Payroll Settings"].map((item) => <button type="button" key={item} onClick={() => flash(`${item} opened.`)}><span>✦</span>{item}</button>)}</div></article></aside>
+      <aside className="payroll-side"><article className="panel payroll-summary-card"><div className="panel-head"><div><h2>Payroll Summary</h2></div><button className="text-button" type="button" onClick={() => flash("Payroll breakdown opened.")}>View full breakdown →</button></div><dl><div><dt>Total Regular Hours</dt><dd>{formatHours(totalRegular)}</dd></div><div><dt>Total Overtime Hours</dt><dd>{formatHours(totalOvertime)}</dd></div><div><dt>Gross Payroll</dt><dd>{money(estimatedCost)}</dd></div><div><dt>Employee Taxes (Est.)</dt><dd>—</dd></div><div><dt>Employer Taxes (Est.)</dt><dd>—</dd></div><div className="payroll-total"><dt>Total Payroll Cost</dt><dd>{money(estimatedCost)}</dd></div></dl><div className="payroll-donut" /><div className="payroll-key"><span><i className="purple" />Gross wages <b>{money(estimatedCost)}</b></span><span><i className="blue" />Employee taxes <b>—</b></span><span><i className="green" />Employer taxes <b>—</b></span></div></article><article className="panel upcoming-payroll"><div className="panel-head"><h2>Upcoming Payroll</h2></div>{upcomingPayrolls.map((period, index) => <button type="button" key={period.label} onClick={() => flash(period.label + " opened.")}><span>$</span><div><strong>{period.label} <em>{paySchedule.frequency}</em></strong><small>Pay Date: {period.payDate}</small></div><b>{index === 0 ? money(estimatedCost) : "$0.00"} &gt;</b></button>)}<button className="text-button" type="button" onClick={() => flash("All payrolls opened.")}>View all payrolls →</button></article><article className="panel payroll-shortcuts"><h2>Payroll Shortcuts</h2><div>{["Add Bonus", "Reimburse Employee", "Manage Deductions", "Payroll Settings"].map((item) => <button type="button" key={item} onClick={() => flash(`${item} opened.`)}><span>✦</span>{item}</button>)}</div></article></aside>
     </div>
     </>}
   </section>;
@@ -2253,13 +2321,13 @@ function messageSentTime(timestamp?: number) {
 
 function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[] }) {
   const [messages, setMessages] = useState<WorkspaceMessage[]>([]);
-  const [activeConversation, setActiveConversation] = useState(viewer.access === "employee" && viewer.employeeId ? `direct-${viewer.employeeId}` : "managers");
+  const [activeConversation, setActiveConversation] = useState(viewer.access === "employee" && viewer.employeeId ? `direct-${viewer.employeeId}` : "");
   const [conversationFilter, setConversationFilter] = useState<"all" | "direct" | "groups" | "unread">("all");
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeMode, setComposeMode] = useState<"direct" | "group">("direct");
   const [composeName, setComposeName] = useState("");
   const [composeMembers, setComposeMembers] = useState<number[]>([]);
-  const [conversations, setConversations] = useState<Array<{ id: string; name: string; kind: "direct" | "group"; memberCount: number; unread: boolean; preview?: string; lastMessageAt?: number; archived?: boolean }>>([{ id: "managers", name: "Managers", kind: "group", memberCount: Math.max(3, employees.length), unread: false }, ...(viewer.access === "employee" && viewer.employeeId ? [{ id: `direct-${viewer.employeeId}`, name: "Owner", kind: "direct" as const, memberCount: 2, unread: false }] : [])]);
+  const [conversations, setConversations] = useState<Array<{ id: string; name: string; kind: "direct" | "group"; memberCount: number; unread: boolean; preview?: string; lastMessageAt?: number; archived?: boolean }>>(viewer.access === "employee" && viewer.employeeId ? [{ id: `direct-${viewer.employeeId}`, name: "Owner", kind: "direct" as const, memberCount: 2, unread: false }] : []);
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [body, setBody] = useState("");
@@ -2372,8 +2440,8 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   useEffect(() => { if (listRef.current) listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [messages.length]);
   useEffect(() => { const openComposer = () => { setComposeMode("direct"); setComposeOpen(true); }; window.addEventListener("coreshift:new-message", openComposer); return () => window.removeEventListener("coreshift:new-message", openComposer); }, []);
   useEffect(() => {
-    if (activeConversation !== "managers") setMessages([]);
-    else loadMessages();
+    setMessages([]);
+    loadMessages();
   }, [activeConversation]);
   useEffect(() => {
     const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".conversation-tabs button"));
@@ -2402,7 +2470,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     return photo ? <img className="conversation-avatar-image" src={photo} alt="" /> : viewer.access === "employee" ? avatarFor(undefined, true) : nameInitials(employee?.displayName ?? employee?.name ?? conversation.name);
   };
   const createConversation = (event: FormEvent) => { event.preventDefault(); const name = composeMode === "group" ? composeName.trim() : employees.find((employee) => employee.id === composeMembers[0])?.name; if (!name || (composeMode === "group" && composeMembers.length < 2)) return; const conversation = { id: composeMode === "direct" ? `direct-${composeMembers[0]}` : `group-${Date.now()}`, name, kind: composeMode, memberCount: composeMode === "group" ? composeMembers.length + 1 : 2, unread: false }; setConversations((current) => (current.some((item) => item.id === conversation.id) ? current : [...current, conversation]).sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name))); setActiveConversation(conversation.id); setMessages([]); setComposeOpen(false); setComposeName(""); setComposeMembers([]); };
-  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread (8)</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className="conversation-avatar">{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p></div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className="conversation-avatar large">{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small>{active?.kind === "group" ? `Group conversation · ${messages.length || employees.length} members` : active ? "Direct conversation" : "Swipe right on a conversation to archive it"}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message) => <div className={`message-bubble ${message.senderType === viewer.access ? "mine" : ""}`} key={message.id}><div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}<time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div><p>{message.body}</p></div>)}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || !body.trim()}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
+  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className="conversation-avatar">{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p></div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className="conversation-avatar large">{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small>{active?.kind === "group" ? `Group conversation · ${messages.length || employees.length} members` : active ? "Direct conversation" : "Swipe right on a conversation to archive it"}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message) => <div className={`message-bubble ${message.senderType === viewer.access ? "mine" : ""}`} key={message.id}><div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}<time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div><p>{message.body}</p></div>)}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || !body.trim()}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
 }
 
 function AiAssistant({ viewer }: { viewer: Viewer }) {
@@ -2755,8 +2823,25 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
   const [notify, setNotify] = useState(true);
   const [differentRates, setDifferentRates] = useState(true);
   const [individualRates, setIndividualRates] = useState(true);
-  const [saved, setSaved] = useState(false);
-  const paySettingsDirtyRef = useRef(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const persistPaySettings = async (updates: Record<string, string | boolean>) => {
+    setSaveStatus("saving");
+    const response = await fetch("/api/settings/pay", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings: updates }),
+    }).catch(() => null);
+    const payload = response ? await response.json().catch(() => null) as { settings?: Record<string, unknown>; error?: string } | null : null;
+    if (!response?.ok || !payload?.settings) {
+      setSaveStatus("error");
+      flash(payload?.error ?? "Pay settings could not be saved.");
+      return false;
+    }
+    try { localStorage.setItem("coreshift-pay-overtime", JSON.stringify(payload.settings)); } catch {}
+    setSaveStatus("saved");
+    return true;
+  };
+  const saved = saveStatus === "saved";
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const root = document.querySelector('.pay-settings-page');
@@ -2765,7 +2850,7 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
       const cards = Array.from(root.querySelectorAll('.pay-settings-card, .pay-info-banner')) as HTMLElement[];
       const readCompanySettings = () => {
         try {
-          const raw = JSON.parse(localStorage.getItem('coreshift-company-pay') || '{}');
+          const raw = JSON.parse(localStorage.getItem('coreshift-pay-overtime') || '{}');
           if (raw.frequency) {
             const selectedFrequency = String(raw.frequency);
             setFrequency(selectedFrequency);
@@ -2780,9 +2865,9 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
             // first option after navigating between settings tabs.
             setPayPeriod(String(raw.payPeriod || periodLabels[selectedFrequency] || selectedFrequency));
           }
-          if (raw.day) setPayDay(String(raw.day));
-          if (raw.weekly !== undefined) setThreshold(String(raw.weekly));
-          if (raw.daily !== undefined) setDailyThreshold(String(raw.daily));
+          if (raw.payDay) setPayDay(String(raw.payDay));
+          if (raw.threshold !== undefined) setThreshold(String(raw.threshold));
+          if (raw.dailyThreshold !== undefined) setDailyThreshold(String(raw.dailyThreshold));
         } catch {}
       };
       const overtimeCard = cards.find((card) => card.textContent?.includes('Overtime Settings'));
@@ -2801,10 +2886,10 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
               if (control !== master) (control as HTMLInputElement | HTMLSelectElement).disabled = !enabled;
             });
           };
-          try { const saved = localStorage.getItem('coreshift-overtime-enabled'); if (saved !== null && master) master.checked = saved !== 'false'; } catch {}
+          try { const saved = JSON.parse(localStorage.getItem('coreshift-pay-overtime') || '{}'); if (saved.overtimeEnabled !== undefined && master) master.checked = saved.overtimeEnabled !== false; } catch {}
           syncOvertimeFields();
           master?.addEventListener('change', (event) => {
-            try { localStorage.setItem('coreshift-overtime-enabled', String((event.target as HTMLInputElement).checked)); } catch {}
+            void persistPaySettings({ overtimeEnabled: (event.target as HTMLInputElement).checked });
             syncOvertimeFields();
           });
         }
@@ -2813,15 +2898,31 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
       panel.className = 'company-pay-panel';
       panel.innerHTML = `<div class="company-pay-main"><section class="company-pay-card"><h2>▣　Company Pay Settings</h2><div class="company-pay-fields"><label>Default Pay Frequency<select data-company="frequency"><option>Weekly</option><option>Biweekly</option><option>Semi-monthly</option><option>Monthly</option></select></label><label>Pay Period Starts<select data-company="starts"><option>Sunday</option><option>Monday</option><option>Saturday</option></select></label><label>Pay Day<select data-company="day"><option>Friday</option><option>Thursday</option><option>Wednesday</option></select></label><label>Default Currency<select><option>USD ($)</option><option>CAD ($)</option><option>EUR (€)</option></select></label><label>Time Zone<select><option>Central Time (CT)</option><option>Eastern Time (ET)</option><option>Mountain Time (MT)</option><option>Pacific Time (PT)</option></select></label></div></section><section class="company-pay-card"><h2>◷　Overtime Rules</h2><div class="company-overtime-grid"><div><strong>Weekly Overtime</strong><input data-company="weekly" type="number" value="40" min="0"/><small>hours / week</small></div><div><strong>Daily Overtime</strong><input data-company="daily" type="number" value="8" min="0"/><small>hours / day</small></div><div><strong>Double Time</strong><input data-company="double" type="number" value="12" min="0"/><small>hours / day</small></div></div><label class="company-check"><input type="checkbox" data-company="disable"/> Disable overtime entirely</label></section><section class="company-pay-card"><h2>♙　Employee Eligibility</h2><div class="company-radio"><label><input type="radio" name="company-eligibility" checked/> Hourly employees</label><label><input type="radio" name="company-eligibility"/> Salary employees</label><label><input type="radio" name="company-eligibility"/> Both hourly and salary employees</label><label><input type="radio" name="company-eligibility"/> Custom (select roles)</label></div></section><section class="company-pay-card"><h2>✦　Premium Pay</h2><div class="company-overtime-grid"><label>Holiday Pay<select><option>2x</option><option>1.5x</option><option>None</option></select></label><label>Weekend Premium<select><option>None</option><option>1.5x</option></select></label><label>Night Shift Differential<input value="$2.00 / hr"/></label></div></section></div><aside class="company-pay-side"><section class="company-live-card"><h2>Live Example <span>Live</span></h2><p>See how these settings affect pay.</p><hr/><b>Regular Pay</b><strong>$600.00</strong><b>Overtime (1.5x)</b><strong>$78.75</strong><hr/><h3>Gross Pay <strong>$678.75</strong></h3></section><section class="company-summary-card"><h2>Summary</h2><p>Pay Frequency <b>Weekly</b></p><p>Pay Day <b>Friday</b></p><p>Overtime (Weekly) <b>40 hrs at 1.5x</b></p><p>Overtime (Daily) <b>8 hrs at 1.5x</b></p></section></aside>`;
       const syncPanelFromReact = () => {
-        let values: Record<string, string> = { frequency, day: payDay, weekly: threshold, daily: dailyThreshold };
+        let values: Record<string, string> = { frequency, payDay, threshold, dailyThreshold };
         try {
-          const stored = JSON.parse(localStorage.getItem('coreshift-company-pay') || '{}');
+          const stored = JSON.parse(localStorage.getItem('coreshift-pay-overtime') || '{}');
           values = { ...values, ...Object.fromEntries(Object.entries(stored).map(([key, value]) => [key, String(value)])) };
         } catch {}
         panel.querySelectorAll('input,select').forEach((control) => {
-          const key = control.getAttribute('data-company');
+          const label = control.closest('label')?.textContent?.trim().toLowerCase() || '';
+          const legacyKey = control.getAttribute('data-company');
+          const key = control.getAttribute('name') === 'company-eligibility' ? 'eligibility'
+            : legacyKey === 'starts' ? 'payPeriodStarts'
+            : legacyKey === 'day' ? 'payDay'
+            : legacyKey === 'weekly' ? 'threshold'
+            : legacyKey === 'daily' ? 'dailyThreshold'
+            : legacyKey === 'double' ? 'doubleTimeThreshold'
+            : legacyKey === 'disable' ? 'overtimeDisabled'
+            : legacyKey || (label.includes('default currency') ? 'currency'
+            : label.includes('time zone') ? 'timeZone'
+            : label.includes('holiday pay') ? 'holidayPay'
+            : label.includes('weekend premium') ? 'weekendPremium'
+            : label.includes('night shift differential') ? 'nightShiftDifferential' : '');
           if (!key || values[key] === undefined) return;
-          if ((control as HTMLInputElement).type !== 'checkbox') (control as HTMLInputElement | HTMLSelectElement).value = values[key];
+          const eligibilityValue = label.startsWith('hourly') ? 'hourly' : label.startsWith('salary') ? 'salary' : label.startsWith('both') ? 'both' : label.startsWith('custom') ? 'custom' : '';
+          if ((control as HTMLInputElement).type === 'checkbox') (control as HTMLInputElement).checked = values[key] === 'true';
+          else if ((control as HTMLInputElement).type === 'radio') (control as HTMLInputElement).checked = values[key] === eligibilityValue;
+          else (control as HTMLInputElement | HTMLSelectElement).value = values[key];
         });
       };
       const showCompany = () => { readCompanySettings(); syncPanelFromReact(); cards.forEach((card) => card.style.display = 'none'); panel.style.display = 'grid'; root.insertBefore(panel, root.querySelector('.pay-settings-card')); tabs.forEach((tab) => tab.classList.remove('active')); tabs[0].classList.add('active'); };
@@ -2831,21 +2932,34 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
       const delegatedCompanyClick = (event: Event) => { const target = event.target as HTMLElement | null; const tab = target?.closest('.pay-settings-tabs button'); if (tab === tabs[0]) showCompany(); };
       document.addEventListener('click', delegatedCompanyClick);
       panel.querySelectorAll('input,select').forEach((control) => {
-        const key = control.getAttribute('data-company');
+        const label = control.closest('label')?.textContent?.trim().toLowerCase() || '';
+        const legacyKey = control.getAttribute('data-company');
+        const key = control.getAttribute('name') === 'company-eligibility' ? 'eligibility'
+          : legacyKey === 'starts' ? 'payPeriodStarts'
+          : legacyKey === 'day' ? 'payDay'
+          : legacyKey === 'weekly' ? 'threshold'
+          : legacyKey === 'daily' ? 'dailyThreshold'
+          : legacyKey === 'double' ? 'doubleTimeThreshold'
+          : legacyKey === 'disable' ? 'overtimeDisabled'
+          : legacyKey || (label.includes('default currency') ? 'currency'
+          : label.includes('time zone') ? 'timeZone'
+          : label.includes('holiday pay') ? 'holidayPay'
+          : label.includes('weekend premium') ? 'weekendPremium'
+          : label.includes('night shift differential') ? 'nightShiftDifferential' : '');
         if (!key) return;
+        const eligibilityValue = label.startsWith('hourly') ? 'hourly' : label.startsWith('salary') ? 'salary' : label.startsWith('both') ? 'both' : label.startsWith('custom') ? 'custom' : '';
         try {
-          const saved = JSON.parse(localStorage.getItem('coreshift-company-pay') || '{}');
+          const saved = JSON.parse(localStorage.getItem('coreshift-pay-overtime') || '{}');
           if (saved[key] !== undefined) {
-            if ((control as HTMLInputElement).type === 'checkbox') (control as HTMLInputElement).checked = saved[key] !== false;
+            if ((control as HTMLInputElement).type === 'checkbox') (control as HTMLInputElement).checked = saved[key] === true;
+            else if ((control as HTMLInputElement).type === 'radio') (control as HTMLInputElement).checked = saved[key] === eligibilityValue;
             else (control as HTMLInputElement).value = String(saved[key]);
           }
         } catch {}
         control.addEventListener('change', () => {
-          try {
-            const current = JSON.parse(localStorage.getItem('coreshift-company-pay') || '{}');
-            const value = (control as HTMLInputElement).type === 'checkbox' ? (control as HTMLInputElement).checked : (control as HTMLInputElement).value;
-            localStorage.setItem('coreshift-company-pay', JSON.stringify({ ...current, [key]: value }));
-          } catch {}
+          if ((control as HTMLInputElement).type === 'radio' && !(control as HTMLInputElement).checked) return;
+          const value = (control as HTMLInputElement).type === 'checkbox' ? (control as HTMLInputElement).checked : (control as HTMLInputElement).type === 'radio' ? eligibilityValue : (control as HTMLInputElement).value;
+          void persistPaySettings({ [key]: value });
         });
       });
       (root as HTMLElement & { _companyCleanup?: () => void })._companyCleanup = () => { tabs[0].removeEventListener('click', showCompany); tabs[1]?.removeEventListener('click', showPay); document.removeEventListener('click', delegatedCompanyClick); panel.remove(); };
@@ -2858,16 +2972,13 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
     const saveControl = (event: Event) => {
       const target = event.target as HTMLInputElement | HTMLSelectElement | null;
       if (!target) return;
-      const label = target.closest('label')?.textContent?.trim().toLowerCase() || '';
-      const key = target.name === 'overtime-applies' ? 'overtimeApplies' : label.includes('approval') ? 'approvalMode' : '';
-      if (!key) return;
-      try {
-        const current = JSON.parse(localStorage.getItem('coreshift-pay-overtime') || '{}');
-        const value = target.type === 'radio' || target.type === 'checkbox' ? (target as HTMLInputElement).checked : target.value;
-        localStorage.setItem('coreshift-pay-overtime', JSON.stringify({ ...current, [key]: value }));
-      } catch {}
-      setSaved(true);
-      window.setTimeout(() => setSaved(false), 900);
+      const isOvertimeGroup = target.name === 'overtime-applies';
+      const isApprovalMode = target.classList.contains('pay-approval-select');
+      if (!isOvertimeGroup && !isApprovalMode) return;
+      if (isOvertimeGroup && !(target as HTMLInputElement).checked) return;
+      const radios = Array.from(root.querySelectorAll<HTMLInputElement>('input[name="overtime-applies"]'));
+      const overtimeValue = ['all', 'nonExempt', 'custom'][radios.indexOf(target as HTMLInputElement)] || 'all';
+      void persistPaySettings({ [isOvertimeGroup ? 'overtimeApplies' : 'approvalMode']: isOvertimeGroup ? overtimeValue : target.value });
     };
     root.addEventListener('change', saveControl);
     return () => root.removeEventListener('change', saveControl);
@@ -2875,25 +2986,19 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
   useEffect(() => {
     const setters = ({ payPeriod, payDay, frequency, rounding, rule, threshold, dailyThreshold, dailyOvertime, doubleTime, approval, notify, differentRates, individualRates } as Record<string, React.Dispatch<React.SetStateAction<any>>>);
     const apply = (raw: Record<string, unknown>) => Object.entries(raw).forEach(([key, value]) => { const setter = setters[key]; if (setter && value !== undefined) setter(value); });
+    const applyUncontrolled = (raw: Record<string, unknown>) => {
+      const root = document.querySelector('.pay-settings-page');
+      const radios = Array.from(root?.querySelectorAll<HTMLInputElement>('input[name="overtime-applies"]') || []);
+      const overtimeIndex = ['all', 'nonExempt', 'custom'].indexOf(String(raw.overtimeApplies || 'all'));
+      radios.forEach((radio, index) => { radio.checked = index === Math.max(0, overtimeIndex); });
+      const approvalSelect = root?.querySelector<HTMLSelectElement>('.pay-approval-select');
+      if (approvalSelect && raw.approvalMode) approvalSelect.value = String(raw.approvalMode);
+    };
     let localSettings: Record<string, unknown> = {};
-    try { localSettings = JSON.parse(localStorage.getItem("coreshift-pay-overtime") || "{}"); apply(localSettings); } catch {}
-    fetch("/api/settings/pay", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ settings?: Record<string, unknown> }> : Promise.reject()).then((payload) => { if (payload.settings) { const merged = { ...payload.settings, ...localSettings }; apply(merged); try { localStorage.setItem("coreshift-pay-overtime", JSON.stringify(merged)); } catch {} } }).catch(() => {});
+    try { localSettings = JSON.parse(localStorage.getItem("coreshift-pay-overtime") || "{}"); } catch {}
+    fetch("/api/settings/pay", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ settings?: Record<string, unknown> }> : Promise.reject()).then((payload) => { if (payload.settings) { apply(payload.settings); applyUncontrolled(payload.settings); try { localStorage.setItem("coreshift-pay-overtime", JSON.stringify(payload.settings)); } catch {} } }).catch(() => { apply(localSettings); applyUncontrolled(localSettings); });
   }, []);
-  const persist = (key: string, value: unknown) => {
-    try {
-      const current = JSON.parse(localStorage.getItem("coreshift-pay-overtime") || "{}");
-      const next = { ...current, [key]: value };
-      localStorage.setItem("coreshift-pay-overtime", JSON.stringify(next));
-      if (key === "payPeriod") {
-        const frequencyValue = String(value).split(" ")[0];
-        const company = JSON.parse(localStorage.getItem("coreshift-company-pay") || "{}");
-        localStorage.setItem("coreshift-company-pay", JSON.stringify({ ...company, frequency: frequencyValue, payPeriod: value }));
-      }
-      void fetch("/api/settings/pay", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ settings: next }) });
-    } catch {}
-    setSaved(true); window.setTimeout(() => setSaved(false), 900);
-  };
-  const field = <T,>(key: string, value: T, setter: React.Dispatch<React.SetStateAction<T>>) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => { paySettingsDirtyRef.current = true; const next = (event.target.type === "checkbox" ? (event.target as HTMLInputElement).checked : event.target.value) as T; setter(next); persist(key, next); if (key === "frequency") { const periodLabels: Record<string, string> = { Weekly: "Weekly (Sunday - Saturday)", Biweekly: "Biweekly (Sunday - Saturday)", "Semi-monthly": "Semi-monthly", Monthly: "Monthly" }; const nextPeriod = periodLabels[String(next)] || String(next); setPayPeriod(nextPeriod); persist("payPeriod", nextPeriod); } };
+  const field = <T,>(key: string, value: T, setter: React.Dispatch<React.SetStateAction<T>>) => (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => { const next = (event.target.type === "checkbox" ? (event.target as HTMLInputElement).checked : event.target.value) as T; setter(next); if (key === "frequency") { const periodLabels: Record<string, string> = { Weekly: "Weekly (Sunday - Saturday)", Biweekly: "Biweekly (Sunday - Saturday)", "Semi-monthly": "Semi-monthly", Monthly: "Monthly" }; const nextPeriod = periodLabels[String(next)] || String(next); setPayPeriod(nextPeriod); void persistPaySettings({ frequency: String(next), payPeriod: nextPeriod }); return; } void persistPaySettings({ [key]: next as string | boolean }); };
   const nav = [["▥", "Organization", "general"], ["▣", "Billing & Subscription", "billing"], ["⌖", "Locations", "general"], ["♙", "Roles & Permissions", "access"], ["◷", "Time & Attendance", "time"], ["▦", "Scheduling", "scheduling"], ["$", "Pay & Overtime", "pay"], ["♧", "Notifications", "notifications"], ["✣", "Integrations", "general"], ["♙", "Account", "owners"], ["▣", "Security", "access"]] as const;
   const Toggle = ({ label, description, value, onChange }: { label: string; description: string; value: boolean; onChange: (event: React.ChangeEvent<HTMLInputElement>) => void }) => <label className="pay-toggle"><input type="checkbox" checked={value} onChange={onChange} /><span className="pay-switch" /><span><strong>{label}</strong><small>{description}</small></span></label>;
   return <div className="settings-reference"><aside className="settings-reference-nav"><div className="settings-ref-nav-list">{nav.map(([icon, title, target]) => <button type="button" className={target === "pay" ? "active" : ""} key={title} onClick={() => onNavigate(target)}><span>{icon}</span><div><strong>{title}</strong><small>{title === "Pay & Overtime" ? "Pay rates and overtime rules" : "Settings and preferences"}</small></div></button>)}</div><div className="settings-ref-promo"><strong>Pay your team with confidence</strong><p>Keep rates, pay periods, and overtime rules in one place.</p><button type="button" onClick={() => flash("Payroll help opened.")}>Learn more</button></div></aside><main className="settings-reference-main pay-settings-page"><header className="pay-settings-header"><div><h1>Pay &amp; Overtime</h1><p>Manage pay rates, overtime rules, and related settings for your team.</p></div><button className="secondary-button" type="button" onClick={() => flash("Pay settings export is ready.")}>⇩ Export Settings</button></header><div className="pay-settings-tabs"><button className="active" type="button">Company</button><button className="active" type="button">Pay &amp; Overtime</button><button type="button" onClick={() => onNavigate("billing")}>Payroll</button><button type="button" onClick={() => onNavigate("time")}>Time &amp; Attendance</button><button type="button" onClick={() => onNavigate("general")}>Integrations</button></div><section className="pay-settings-card"><h2>Pay Settings</h2><div className="pay-settings-grid"><label>Default Pay Period<select value={payPeriod} onChange={field("payPeriod", payPeriod, setPayPeriod)}><option>Weekly (Sunday - Saturday)</option><option>Biweekly (Sunday - Saturday)</option><option>Semi-monthly</option><option>Monthly</option></select></label><label>Rounding<select value={rounding} onChange={field("rounding", rounding, setRounding)}><option>Exact time</option><option>5 minutes (0.08)</option><option>15 minutes (0.25)</option><option>30 minutes (0.5)</option></select></label><label>Pay Day<select value={payDay} onChange={field("payDay", payDay, setPayDay)}>{["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"].map(day => <option key={day}>{day}</option>)}</select></label><Toggle label="Allow different rates by role / position" description="Enable custom pay rates for different roles." value={differentRates} onChange={field("differentRates", differentRates, setDifferentRates)} /><label>Pay Frequency<select value={frequency} onChange={field("frequency", frequency, setFrequency)}><option>Weekly</option><option>Biweekly</option><option>Semi-monthly</option><option>Monthly</option></select></label><Toggle label="Allow individual pay rate overrides" description="Managers can set custom rates per employee." value={individualRates} onChange={field("individualRates", individualRates, setIndividualRates)} /></div><div className="pay-rate-table"><h3>Pay Rates</h3><div className="pay-rate-head"><span>Role / Position</span><span>Type</span><span>Rate</span><span>Actions</span></div>{[["Barista","Hourly","$15.00 / hr"],["Shift Lead","Hourly","$16.50 / hr"],["Cashier","Hourly","$14.00 / hr"],["Manager","Salary","$52,000 / yr"]].map(([role, type, rate]) => <div className="pay-rate-row" key={role}><strong>{role}</strong><span>{type}</span><span>{rate}</span><span>✎　▢</span></div>)}<button type="button" className="pay-add-rate" onClick={() => flash("Add pay rate opened.")}>＋ Add Pay Rate</button></div></section><section className="pay-settings-card"><h2>Overtime Settings</h2><div className="pay-settings-grid"><label>Overtime Rule<select value={rule} onChange={field("rule", rule, setRule)}><option>Time and a half (1.5x)</option><option>Double time (2x)</option><option>Custom multiplier</option></select></label><label>Overtime Threshold<div className="pay-input-suffix"><input value={threshold} onChange={field("threshold", threshold, setThreshold)} /><span>hours / week</span></div></label><Toggle label="Daily Overtime" description="Enable daily overtime after a set number of hours." value={dailyOvertime} onChange={field("dailyOvertime", dailyOvertime, setDailyOvertime)} /><label>Daily Threshold<div className="pay-input-suffix"><input value={dailyThreshold} onChange={field("dailyThreshold", dailyThreshold, setDailyThreshold)} /><span>hours / day</span></div></label><Toggle label="Double Time" description="Enable double time after the daily overtime threshold." value={doubleTime} onChange={field("doubleTime", doubleTime, setDoubleTime)} /><div className="pay-note">ⓘ Double time will be applied after the daily overtime threshold.</div><fieldset><legend>Overtime Applies To</legend><label><input type="radio" name="overtime-applies" defaultChecked /> All employees</label><label><input type="radio" name="overtime-applies" /> Non-exempt employees only</label><label><input type="radio" name="overtime-applies" /> Custom</label></fieldset><div><Toggle label="Overtime Approval" description="Require approval for overtime hours." value={approval} onChange={field("approval", approval, setApproval)} /><select className="pay-approval-select" defaultValue="Manager approval required"><option>Manager approval required</option><option>Owner approval required</option><option>No approval required</option></select><label className="pay-check"><input type="checkbox" checked={notify} onChange={field("notify", notify, setNotify)} /> Notify when overtime is worked</label></div></div></section><div className="pay-info-banner"><div><strong>Need to make advanced payroll changes?</strong><p>Visit Payroll Settings to manage taxes, deductions, and other payroll preferences.</p></div><button type="button" onClick={() => onNavigate("billing")}>Go to Payroll Settings　→</button></div>{saved && <span className="pay-auto-save">Saved</span>}</main></div>;
@@ -2987,7 +3092,7 @@ function Settings({ flash, businessName, ownerName, ownerEmail }: { flash: (mess
   else if (section === "scheduling") settingsPage = <SchedulingSettingsFixed flash={settingsFlash} onNavigate={navigate} />;
   else if (section === "owners") settingsPage = <AccountSettingsExact flash={settingsFlash} onNavigate={navigate} ownerName={ownerName} ownerEmail={ownerEmail} />;
   else if (section === "notifications") settingsPage = <NotificationsSettingsExact flash={settingsFlash} onNavigate={navigate} />;
-  else if (section === "pay") settingsPage = <PayOvertimeSettingsPage flash={settingsFlash} onNavigate={navigate} />;
+  else if (section === "pay") settingsPage = <PersistentPayOvertimeSettingsPage flash={settingsFlash} onNavigate={navigate} />;
   else settingsPage = <SettingsReference businessName={businessName} organization={organizationDraft} flash={flash} section={section} setSection={setSection} rounding={rounding} timeFormat={timeFormat} updateTimeFormat={updateTimeFormat} fontSize={fontSize} updateFontSize={updateFontSize} />;
   return <>{settingsPage}{editingSetting === "organization-info" && <div className="modal-backdrop settings-action-backdrop" role="presentation"><form className="modal-card organization-edit-modal" onSubmit={(event) => { event.preventDefault(); window.localStorage.setItem("coreshift-organization", JSON.stringify(organizationDraft)); setEditingSetting(null); flash("Organization information saved."); }}><div className="modal-head"><div><p className="eyebrow">Organization profile</p><h2>Edit organization info</h2><p>Update your company details in one organized form.</p></div><button type="button" onClick={() => setEditingSetting(null)} aria-label="Close">×</button></div><div className="modal-body organization-edit-grid"><label>Company name<input autoFocus value={organizationDraft.name} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, name: event.target.value }))} /></label><label>Business email<input type="email" value={organizationDraft.email} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, email: event.target.value }))} /></label><label className="organization-edit-wide">Business address<textarea rows={2} value={organizationDraft.address} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, address: event.target.value }))} /></label><label>Time zone<select value={organizationDraft.timeZone} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, timeZone: event.target.value }))}><option>Central Time (CT)</option><option>Eastern Time (ET)</option><option>Mountain Time (MT)</option><option>Pacific Time (PT)</option></select></label><label>Industry<input value={organizationDraft.industry} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, industry: event.target.value }))} /></label><label>Company size<input value={organizationDraft.companySize} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, companySize: event.target.value }))} /></label><label>Week starts on<select value={organizationDraft.weekStarts} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, weekStarts: event.target.value }))}><option>Sunday</option><option>Monday</option></select></label><div className="modal-actions organization-edit-actions"><button type="button" className="secondary-button" onClick={() => setEditingSetting(null)}>Cancel</button><button type="submit" className="primary-button">Save organization</button></div></div></form></div>}{editingSetting && editingSetting !== "organization-info" && <div className="modal-backdrop settings-action-backdrop" role="presentation"><form className="modal-card settings-action-modal" onSubmit={(event) => { event.preventDefault(); window.localStorage.setItem(editingSetting, editingValue); setEditingSetting(null); flash("Draft saved."); }}><div className="modal-head"><div><p className="eyebrow">Settings draft</p><h2>Edit setting</h2><p>Your changes are a draft until you save them.</p></div><button type="button" onClick={() => setEditingSetting(null)} aria-label="Close">×</button></div><div className="modal-body"><label>Draft value<textarea autoFocus value={editingValue} onChange={(event) => setEditingValue(event.target.value)} rows={4} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => { setEditingSetting(null); flash("Draft discarded."); }}>Discard draft</button><button type="submit" className="primary-button">Save draft</button></div></div></form></div>}</>;
   return <div className="settings-layout">

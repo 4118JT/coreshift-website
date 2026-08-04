@@ -52,6 +52,8 @@ export async function GET(request: Request) {
   const requestedPeriodEnd = Number(url.searchParams.get("periodEnd"));
   const selectedStart = range === "all"
     ? 0
+    : range === "custom"
+      ? (Number.isFinite(requestedPeriodStart) && requestedPeriodStart >= 0 ? requestedPeriodStart : boundaries.week)
     : ["last-week", "two-weeks"].includes(range)
       ? (Number.isFinite(requestedPeriodStart) && requestedPeriodStart >= 0 ? requestedPeriodStart : boundaries.week)
       : boundaries[range as keyof typeof boundaries];
@@ -122,16 +124,16 @@ export async function GET(request: Request) {
   const paidCents = Math.round(selected?.totalCents ?? 0);
   const owedCents = Math.max(0, earnedCents - paidCents);
   const employeeHours = await database().prepare(`
-    SELECT e.id, e.name, e.initials, e.color, e.hourly_rate_cents AS hourlyRateCents,
+    SELECT e.id, e.name, e.role, e.initials, e.color, e.hourly_rate_cents AS hourlyRateCents,
       COALESCE(SUM(CASE WHEN te.clock_out IS NOT NULL AND te.clock_out > ?
         THEN (te.clock_out - CASE WHEN te.clock_in > ? THEN te.clock_in ELSE ? END) / 60000 ELSE 0 END), 0) AS minutes
     FROM employees e
     LEFT JOIN time_entries te ON te.employee_id = e.id ${selectedEnd ? "AND te.clock_in <= ?" : ""}
     WHERE e.business_id = ? AND e.active = 1
-    GROUP BY e.id, e.name, e.initials, e.color, e.hourly_rate_cents
+    GROUP BY e.id, e.name, e.role, e.initials, e.color, e.hourly_rate_cents
     ORDER BY e.name
   `).bind(...(selectedEnd ? [selectedStart, selectedStart, selectedStart, selectedEnd, viewer.businessId] : [selectedStart, selectedStart, selectedStart, viewer.businessId])).all<{
-    id: number; name: string; initials: string; color: string; hourlyRateCents: number; minutes: number;
+    id: number; name: string; role: string; initials: string; color: string; hourlyRateCents: number; minutes: number;
   }>();
   const employeePaid = await database().prepare(`
     SELECT employee_id AS employeeId, COALESCE(SUM(amount_cents), 0) AS paidCents
@@ -142,7 +144,7 @@ export async function GET(request: Request) {
     const minutes = Math.max(0, Math.round(row.minutes));
     const earned = Math.round((minutes / 60) * row.hourlyRateCents);
     const paid = paidByEmployee.get(row.id) ?? 0;
-    return { id: row.id, name: row.name, initials: row.initials, color: row.color, hourlyRateCents: row.hourlyRateCents, minutes, earnedCents: earned, paidCents: paid, owedCents: Math.max(0, earned - paid) };
+    return { id: row.id, name: row.name, role: row.role, initials: row.initials, color: row.color, hourlyRateCents: row.hourlyRateCents, minutes, earnedCents: earned, paidCents: paid, owedCents: Math.max(0, earned - paid) };
   });
 
   return Response.json({

@@ -1858,7 +1858,7 @@ h1 { color: #11182b; font-size: clamp(27px, 3vw, 35px); letter-spacing: -1.2px; 
 .payroll-table { grid-template-columns: minmax(145px, 1.8fr) repeat(4, minmax(74px, 1fr)) minmax(78px, .9fr) minmax(82px, .9fr); min-width: 760px; }
 .payroll-table > * { min-width: 0; }
 .payroll-status { min-width: 82px; white-space: nowrap; }
-.pay-history-view{display:flex;flex-direction:column;gap:18px}.pay-history-header{display:flex;justify-content:space-between;align-items:flex-start;gap:20px}.pay-history-header h1{margin:0;font-size:30px}.pay-history-header p{margin:6px 0 0;color:#68748a}.pay-history-actions{display:flex;gap:10px}.pay-history-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.pay-history-kpis article{padding:18px;min-height:130px}.pay-history-kpis small,.pay-history-kpis em{display:block;color:#68748a}.pay-history-kpis strong{display:block;font-size:24px;margin:8px 0}.pay-history-kpis em{font-style:normal;font-size:12px}.pay-history-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:18px;align-items:start}.pay-history-list{overflow:hidden}.pay-history-list-head{display:flex;justify-content:space-between;align-items:center;padding:20px;border-bottom:1px solid #edf0f5}.pay-history-list-head h2,.pay-history-summary h2{margin:0;font-size:16px}.pay-history-list-head p{margin:5px 0 0;color:#7b8497;font-size:12px}.pay-period-summary{width:100%;display:grid;grid-template-columns:24px minmax(160px,1.6fr) 90px 110px 110px;gap:12px;align-items:center;border:0;border-bottom:1px solid #edf0f5;background:#fff;padding:17px 20px;text-align:left;color:#26324c;cursor:pointer}.pay-period-summary:hover{background:#faf9ff}.pay-period-summary>b{color:#5532dc}.pay-chevron{font-size:20px;color:#5532dc}.history-status{display:inline-flex;justify-content:center;align-items:center;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:700;white-space:nowrap}.history-status.paid{background:#e6f7ed;color:#21864d}.history-status.pending{background:#fff3df;color:#b26b10}.pay-period-details{padding:0 20px 12px}.pay-history-table{display:grid;grid-template-columns:minmax(180px,1.6fr) 100px 110px 100px 82px;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid #f0f1f5;font-size:12px;color:#536078}.pay-history-table-head{color:#7b8497;text-transform:uppercase;font-weight:700;font-size:10px}.pay-history-person{display:flex;align-items:center;gap:9px}.pay-history-person strong{color:#26324c}.pay-history-person small{display:block;color:#7b8497;font-weight:400;margin-top:3px}.pay-history-table>strong{color:#26324c}.pay-history-summary{padding:20px}.pay-history-summary>div{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #edf0f5;color:#59657d;font-size:13px}.pay-history-summary>div strong{color:#26324c}.pay-history-summary .secondary-button{width:100%;margin-top:18px}@media(max-width:900px){.pay-history-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.pay-history-grid{grid-template-columns:1fr}.pay-history-summary{display:none}}@media(max-width:600px){.pay-history-header{flex-direction:column}.pay-history-actions{width:100%}.pay-history-actions button{flex:1}.pay-history-kpis{grid-template-columns:1fr}.pay-period-summary{grid-template-columns:22px minmax(130px,1fr) 78px 90px}.pay-period-summary>span:last-child{display:none}.pay-history-table{min-width:600px}.pay-period-details{overflow-x:auto}}
+.pay-history-view{display:flex;flex-direction:column;gap:18px}.pay-history-header{display:flex;justify-content:space-between;align-items:flex-start;gap:20px}.pay-history-header h1{margin:0;font-size:30px}.pay-history-header p{margin:6px 0 0;color:#68748a}.pay-history-actions{display:flex;gap:10px}.pay-history-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.pay-history-kpis article{padding:18px;min-height:130px}.pay-history-kpis small,.pay-history-kpis em{display:block;color:#68748a}.pay-history-kpis strong{display:block;font-size:24px;margin:8px 0}.pay-history-kpis em{font-style:normal;font-size:12px}.pay-history-grid{display:grid;grid-template-columns:minmax(0,1fr) 280px;gap:18px;align-items:start}.pay-history-list{overflow:hidden}.pay-history-list-head{display:flex;justify-content:space-between;align-items:center;padding:20px;border-bottom:1px solid #edf0f5}.pay-history-list-head h2,.pay-history-summary h2{margin:0;font-size:16px}.pay-history-list-head p{margin:5px 0 0;color:#7b8497;font-size:12px}.pay-period-summary{width:100%;display:grid;grid-template-columns:24px minmax(160px,1.6fr) 90px 110px 110px;gap:12px;align-items:center;border:0;border-bottom:1px solid #edf0f5;background:#fff;padding:17px 20px;text-align:left;color:#26324c;cursor:pointer}.pay-period-summary:hover{background:#faf9ff}.pay-period-summary>b{color:#5532dc}.pay-chevron{font-size:20px;color:#5532dc}.history-status{display:inline-flex;justify-content:center;align-items:center;border-radius:999px;padding:4px 9px;font-size:11px;font-weight:700;white-space:nowrap}.history-status.paid{background:#e6f7ed;color:#21864d}.history-status.pending{background:#fff3df;color:#b26b10}.pay-period-details{padding:0 20px 12px}.pay-history-table{display:grid;grid-template-columns:minmax(180px,1.6fr) 100px 110px 100px 82px;gap:12px;align-items:center;padding:12px 0;border-bottom:1px solid #f0f1f5;font-size:12px;color:#536078}.pay-history-table-head{color:#7b8497;text-transform:uppercase;font-weight:700;font-size:10px}.pay-history-person{display:flex;align-items:center;gap:9px}.pay-history-person strong{color:#26324c}.pay-history-person small{display:block;color:#7b8497;font-weight:400;margin-top:3px}.pay-history-table>strong{color:#26324c}.pay-history-money{display:grid;gap:5px;min-width:0}.pay-history-money>span{display:flex;align-items:center;justify-content:space-between;gap:8px}.pay-history-money small{color:#7b8497;font-size:9px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}.pay-history-money strong{color:#21864d;font-size:12px;font-variant-numeric:tabular-nums;white-space:nowrap}.pay-history-money .has-balance strong{color:#b26b10}.pay-history-summary{padding:20px}.pay-history-summary>div{display:flex;justify-content:space-between;padding:14px 0;border-bottom:1px solid #edf0f5;color:#59657d;font-size:13px}.pay-history-summary>div strong{color:#26324c}.pay-history-summary .secondary-button{width:100%;margin-top:18px}@media(max-width:900px){.pay-history-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.pay-history-grid{grid-template-columns:1fr}.pay-history-summary{display:none}}@media(max-width:600px){.pay-history-header{flex-direction:column}.pay-history-actions{width:100%}.pay-history-actions button{flex:1}.pay-history-kpis{grid-template-columns:1fr}.pay-period-summary{grid-template-columns:22px minmax(130px,1fr) 78px 90px}.pay-period-summary>span:last-child{display:none}.pay-history-table{min-width:600px}.pay-period-details{overflow-x:auto}}
 /* Weekly schedule reference layout polish */
 .content:has(.schedule-reference-head)>.page-welcome{display:none}
 .content:has(.schedule-reference-head){padding-top:24px}
@@ -2280,6 +2280,311 @@ html[data-theme="dark"] .product-content .panel-head h3,html[data-theme="dark"] 
 .conversation-swipe-action{position:absolute;inset:0 auto 0 0;display:flex;align-items:center;padding:0 18px;background:linear-gradient(90deg,#5c45d2,#7967e8);color:#fff;font-size:10px;font-weight:800;letter-spacing:.02em;pointer-events:none}
 .conversation-swipe-wrap .conversation-item{position:relative;z-index:1;transition:transform .18s ease;touch-action:pan-y}
 .conversation-swipe-wrap .conversation-item:active{cursor:grabbing}
+
+/* Professional messages workspace */
+.messages-reference{
+  --message-ink:#17233b;
+  --message-muted:#6e7b91;
+  --message-line:#e3e8f0;
+  --message-accent:#5542d7;
+  align-items:stretch;
+  grid-template-columns:minmax(300px,360px) minmax(0,1fr);
+  gap:20px;
+  min-height:720px;
+  padding:2px;
+  background:
+    radial-gradient(circle at 5% 5%,rgba(85,66,215,.07),transparent 24%),
+    radial-gradient(circle at 96% 94%,rgba(42,157,99,.06),transparent 22%);
+}
+.messages-reference .conversation-list,
+.messages-reference .active-conversation{
+  border:1px solid var(--message-line);
+  border-radius:18px;
+  background:#fff;
+  box-shadow:0 16px 40px rgba(28,39,68,.07);
+}
+.messages-reference .conversation-list{padding:18px 10px 10px}
+.messages-reference .conversation-search{
+  height:44px;
+  margin:0 8px 14px;
+  padding:0 13px;
+  border-color:#dfe5ee;
+  border-radius:12px;
+  background:#f7f9fc;
+  color:#69778d;
+  transition:border-color .18s ease,box-shadow .18s ease,background .18s ease;
+}
+.messages-reference .conversation-search:focus-within{
+  border-color:#9d90ec;
+  background:#fff;
+  box-shadow:0 0 0 4px rgba(85,66,215,.09);
+}
+.messages-reference .conversation-search input{
+  background:transparent;
+  color:var(--message-ink);
+  font-size:12px;
+}
+.messages-reference .conversation-search input::placeholder{color:#98a2b2}
+.messages-reference .conversation-tabs{
+  gap:4px;
+  margin:0 8px 12px;
+  padding:4px;
+  border:0;
+  border-radius:11px;
+  background:#f2f4f8;
+}
+.messages-reference .conversation-tabs button{
+  flex:1;
+  height:34px;
+  padding:0 8px;
+  border:0;
+  border-radius:8px;
+  color:#717d90;
+  font-size:9px;
+  font-weight:750;
+  white-space:nowrap;
+}
+.messages-reference .conversation-tabs button.active{
+  border:0;
+  background:#fff;
+  color:var(--message-accent);
+  box-shadow:0 2px 7px rgba(30,40,68,.09);
+}
+.messages-reference .conversation-swipe-wrap{
+  margin:4px 5px;
+  border-radius:14px;
+}
+.messages-reference .conversation-item{
+  grid-template-columns:44px minmax(0,1fr) auto;
+  gap:11px;
+  min-height:76px;
+  padding:11px 12px;
+  border:1px solid transparent;
+  border-radius:14px;
+  background:#fff;
+  transition:border-color .18s ease,background .18s ease,box-shadow .18s ease,transform .18s ease;
+}
+.messages-reference .conversation-item:hover{
+  border-color:#e5e1fb;
+  background:#faf9ff;
+  box-shadow:0 6px 18px rgba(48,39,104,.06);
+}
+.messages-reference .conversation-item.active{
+  padding-left:12px;
+  border-color:#dcd6fb;
+  background:linear-gradient(135deg,#f5f2ff,#fbfaff);
+  box-shadow:inset 3px 0 var(--message-accent),0 7px 18px rgba(61,46,141,.08);
+}
+.messages-reference .conversation-avatar{
+  width:42px;
+  height:42px;
+  border:1px solid #ded8fb;
+  border-radius:50%;
+  background:linear-gradient(145deg,#f1edff,#e5dfff);
+  color:var(--message-accent);
+  font-size:17px;
+  font-weight:800;
+}
+.messages-reference .conversation-item.active .conversation-avatar{
+  border-color:#cfc5fb;
+  background:linear-gradient(145deg,#e9e3ff,#dcd2ff);
+}
+.messages-reference .conversation-item strong{
+  color:var(--message-ink);
+  font-size:12px;
+  letter-spacing:-.01em;
+}
+.messages-reference .conversation-item p{
+  margin-top:5px;
+  color:var(--message-muted);
+  font-size:10px;
+  line-height:1.35;
+}
+.messages-reference .conversation-item time{
+  margin-top:2px;
+  padding:3px 6px;
+  border-radius:999px;
+  background:#f3f5f8;
+  color:#7e899a;
+  font-size:8px;
+  font-weight:700;
+}
+.messages-reference .conversation-archive{
+  margin-top:8px;
+  padding:13px 14px;
+  border-radius:11px;
+  background:transparent;
+  color:#6250ce;
+  font-size:9px;
+}
+.messages-reference .conversation-archive:hover{background:#f6f3ff}
+.messages-reference .active-conversation{
+  min-width:0;
+  overflow:hidden;
+}
+.messages-reference .conversation-head{
+  min-height:86px;
+  padding:18px 22px;
+  border-bottom:1px solid var(--message-line);
+  background:linear-gradient(120deg,#fff 55%,#f7f5ff);
+}
+.messages-reference .conversation-head>div:first-child{gap:12px}
+.messages-reference .conversation-head .conversation-avatar.large{
+  width:46px;
+  height:46px;
+  box-shadow:0 7px 18px rgba(85,66,215,.13);
+}
+.messages-reference .conversation-head h3{
+  color:var(--message-ink);
+  font-size:17px;
+  letter-spacing:-.02em;
+}
+.messages-reference .conversation-head small{
+  margin-top:5px;
+  color:var(--message-muted);
+  font-size:10px;
+}
+.messages-reference .reference-message-list{
+  min-height:500px;
+  padding:28px 30px;
+  background-color:#f8fafc;
+  background-image:radial-gradient(rgba(90,101,126,.09) .7px,transparent .7px);
+  background-size:18px 18px;
+}
+.messages-reference .message-day-divider{
+  width:max-content;
+  margin:0 auto 26px;
+  padding:5px 11px;
+  border:1px solid #e2e7ef;
+  border-radius:999px;
+  background:rgba(255,255,255,.9);
+  color:#7a8597;
+  font-size:9px;
+  font-weight:700;
+  box-shadow:0 3px 10px rgba(38,47,70,.04);
+}
+.messages-reference .message-day-divider::before,
+.messages-reference .message-day-divider::after{display:none}
+.messages-reference .reference-message-list .message-bubble{
+  max-width:min(72%,620px);
+  margin-bottom:24px;
+}
+.messages-reference .reference-message-list .message-bubble>div{gap:8px}
+.messages-reference .message-sender-avatar{
+  display:grid;
+  place-items:center;
+  width:24px;
+  height:24px;
+  border-radius:50%;
+  background:#ece8ff;
+  color:#5945d2;
+  font-size:11px;
+}
+.messages-reference .reference-message-list .message-bubble strong{
+  color:#2b3650;
+  font-size:10px;
+}
+.messages-reference .reference-message-list .message-bubble time{color:#8994a5}
+.messages-reference .reference-message-list .message-bubble p{
+  margin-top:8px;
+  padding:13px 15px;
+  border:1px solid #e0e5ed;
+  border-radius:5px 16px 16px 16px;
+  background:#fff;
+  color:#27334a;
+  font-size:12px;
+  line-height:1.55;
+  box-shadow:0 8px 24px rgba(31,42,68,.07);
+}
+.messages-reference .reference-message-list .message-bubble.mine>div{justify-content:flex-end}
+.messages-reference .reference-message-list .message-bubble.mine p{
+  border-color:#5542d7;
+  border-radius:16px 5px 16px 16px;
+  background:linear-gradient(135deg,#6552e4,#4e3bca);
+  color:#fff;
+  box-shadow:0 9px 24px rgba(70,52,177,.2);
+}
+.messages-reference .messages-empty{
+  min-height:260px;
+  place-self:center;
+  padding:28px 34px;
+  border:1px solid #e5e9f0;
+  border-radius:18px;
+  background:rgba(255,255,255,.92);
+  box-shadow:0 12px 32px rgba(35,44,70,.06);
+}
+.messages-reference .messages-empty strong{color:var(--message-ink);font-size:14px}
+.messages-reference .messages-empty span{color:var(--message-muted);font-size:10px}
+.messages-reference .reference-composer{
+  display:grid;
+  grid-template-columns:1fr;
+  gap:10px;
+  margin:16px 20px 20px;
+  padding:12px 14px 11px;
+  border:1px solid #dce2eb;
+  border-radius:16px;
+  background:#fff;
+  box-shadow:0 10px 28px rgba(30,41,68,.08);
+  transition:border-color .18s ease,box-shadow .18s ease;
+}
+.messages-reference .reference-composer:focus-within{
+  border-color:#998bec;
+  box-shadow:0 0 0 4px rgba(85,66,215,.08),0 12px 30px rgba(30,41,68,.08);
+}
+.messages-reference .reference-composer textarea{
+  min-height:54px;
+  padding:4px 2px;
+  background:transparent;
+  color:var(--message-ink);
+  font-size:12px;
+  line-height:1.45;
+}
+.messages-reference .reference-composer>div{
+  padding-top:9px;
+  border-top:1px solid #edf0f4;
+  color:#7d889a;
+  font-size:9px;
+}
+.messages-reference .reference-composer .primary-button{
+  height:36px;
+  padding:0 17px;
+  border-radius:10px;
+  background:linear-gradient(135deg,#6552e4,#4e3bca);
+  font-size:10px;
+  box-shadow:0 6px 16px rgba(79,59,201,.2);
+}
+@media(max-width:900px){
+  .messages-reference{grid-template-columns:1fr;min-height:0}
+  .messages-reference .conversation-list{max-height:390px}
+  .messages-reference .active-conversation{min-height:580px}
+}
+@media(max-width:600px){
+  .messages-reference{gap:12px;padding:0}
+  .messages-reference .conversation-list,.messages-reference .active-conversation{border-radius:14px}
+  .messages-reference .reference-message-list{min-height:420px;padding:22px 16px}
+  .messages-reference .reference-message-list .message-bubble{max-width:88%}
+  .messages-reference .reference-composer{margin:12px}
+  .messages-reference .conversation-tabs{overflow-x:auto}
+}
+html[data-theme="dark"] .messages-reference{
+  --message-ink:#f1f3fb;
+  --message-muted:#a9b2c6;
+  --message-line:#343c59;
+  background:radial-gradient(circle at 5% 5%,rgba(106,87,226,.15),transparent 26%);
+}
+html[data-theme="dark"] .messages-reference .conversation-list,
+html[data-theme="dark"] .messages-reference .active-conversation,
+html[data-theme="dark"] .messages-reference .conversation-item{background:#1b213b!important}
+html[data-theme="dark"] .messages-reference .conversation-search,
+html[data-theme="dark"] .messages-reference .conversation-tabs,
+html[data-theme="dark"] .messages-reference .conversation-item time{background:#151b32;color:#b7c0d4}
+html[data-theme="dark"] .messages-reference .conversation-item.active{border-color:#554c86;background:linear-gradient(135deg,#29234b,#211f40)!important}
+html[data-theme="dark"] .messages-reference .conversation-head{background:linear-gradient(120deg,#1b213b,#242044)}
+html[data-theme="dark"] .messages-reference .reference-message-list{background-color:#141a30;background-image:radial-gradient(rgba(168,177,204,.12) .7px,transparent .7px)}
+html[data-theme="dark"] .messages-reference .reference-message-list .message-bubble p,
+html[data-theme="dark"] .messages-reference .reference-composer,
+html[data-theme="dark"] .messages-reference .messages-empty,
+html[data-theme="dark"] .messages-reference .message-day-divider{border-color:#363e5c;background:#202742;color:#edf0fb}
 
 /* Pay & Overtime settings */
 .pay-settings-page{position:relative;padding:28px 32px 44px;background:#fbfcff;min-height:100%;}
