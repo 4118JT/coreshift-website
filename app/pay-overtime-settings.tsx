@@ -28,8 +28,11 @@ type PaySettings = {
   approvalMode: string;
   eligibility: string;
   holidayPay: string;
+  holidayPayEnabled: boolean;
   weekendPremium: string;
+  weekendPremiumEnabled: boolean;
   nightShiftDifferential: string;
+  nightShiftDifferentialEnabled: boolean;
 };
 
 const defaults: PaySettings = {
@@ -56,8 +59,11 @@ const defaults: PaySettings = {
   approvalMode: "Manager approval required",
   eligibility: "hourly",
   holidayPay: "2x",
+  holidayPayEnabled: true,
   weekendPremium: "None",
+  weekendPremiumEnabled: false,
   nightShiftDifferential: "$2.00 / hr",
+  nightShiftDifferentialEnabled: true,
 };
 
 export default function PersistentPayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: string) => void; onNavigate: (target: SettingsTarget) => void }) {
@@ -136,8 +142,8 @@ export default function PersistentPayOvertimeSettingsPage({ flash, onNavigate }:
     ["A", "Account", "owners"], ["S", "Security", "access"],
   ];
 
-  const Toggle = ({ setting, label, description }: { setting: keyof Pick<PaySettings, "dailyOvertime" | "doubleTime" | "approval" | "notify" | "differentRates" | "individualRates" | "overtimeEnabled">; label: string; description: string }) => (
-    <label className="pay-toggle"><input type="checkbox" checked={settings[setting]} onChange={(event) => update(setting, event.target.checked)} disabled={!loaded || saving} /><span className="pay-switch" /><span><strong>{label}</strong><small>{description}</small></span></label>
+  const Toggle = ({ setting, label, description, disabled = false }: { setting: keyof Pick<PaySettings, "dailyOvertime" | "doubleTime" | "approval" | "notify" | "differentRates" | "individualRates" | "overtimeEnabled" | "holidayPayEnabled" | "weekendPremiumEnabled" | "nightShiftDifferentialEnabled">; label: string; description: string; disabled?: boolean }) => (
+    <label className="pay-toggle"><input type="checkbox" checked={settings[setting]} onChange={(event) => update(setting, event.target.checked)} disabled={!loaded || saving || disabled} /><span className="pay-switch" /><span><strong>{label}</strong><small>{description}</small></span></label>
   );
 
   return <div className="settings-reference">
@@ -160,22 +166,25 @@ export default function PersistentPayOvertimeSettingsPage({ flash, onNavigate }:
         <Toggle setting="individualRates" label="Allow individual pay rate overrides" description="Set custom rates per employee." />
       </div></section>
       <section className="pay-settings-card"><h2>Overtime Settings</h2><div className="pay-settings-grid">
-        <Toggle setting="overtimeEnabled" label="Overtime enabled" description="Calculate overtime using the rules below." />
+        <Toggle setting="overtimeEnabled" label="Do you offer overtime pay?" description={settings.overtimeEnabled ? "Yes. Overtime rules are active." : "No. Overtime calculations are turned off."} />
         <label>Overtime Rule<select value={settings.rule} onChange={(event) => update("rule", event.target.value)} disabled={!loaded || !settings.overtimeEnabled}><option>Time and a half (1.5x)</option><option>Double time (2x)</option><option>Custom multiplier</option></select></label>
         <label>Weekly Threshold<div className="pay-input-suffix"><input type="number" min="0" value={settings.threshold} onChange={(event) => update("threshold", event.target.value)} disabled={!loaded || !settings.overtimeEnabled} /><span>hours / week</span></div></label>
-        <Toggle setting="dailyOvertime" label="Daily Overtime" description="Enable overtime after a daily threshold." />
-        <label>Daily Threshold<div className="pay-input-suffix"><input type="number" min="0" value={settings.dailyThreshold} onChange={(event) => update("dailyThreshold", event.target.value)} disabled={!loaded || !settings.overtimeEnabled} /><span>hours / day</span></div></label>
-        <Toggle setting="doubleTime" label="Double Time" description="Enable double time after the threshold." />
+        <Toggle setting="dailyOvertime" label="Daily Overtime" description="Enable overtime after a daily threshold." disabled={!settings.overtimeEnabled} />
+        <label>Daily Threshold<div className="pay-input-suffix"><input type="number" min="0" value={settings.dailyThreshold} onChange={(event) => update("dailyThreshold", event.target.value)} disabled={!loaded || !settings.overtimeEnabled || !settings.dailyOvertime} /><span>hours / day</span></div></label>
+        <Toggle setting="doubleTime" label="Double Time" description="Enable double time after the threshold." disabled={!settings.overtimeEnabled} />
         <label>Double Time Threshold<div className="pay-input-suffix"><input type="number" min="0" value={settings.doubleTimeThreshold} onChange={(event) => update("doubleTimeThreshold", event.target.value)} disabled={!loaded || !settings.overtimeEnabled || !settings.doubleTime} /><span>hours / day</span></div></label>
-        <fieldset><legend>Overtime Applies To</legend>{[["all", "All employees"], ["nonExempt", "Non-exempt employees only"], ["custom", "Custom"]].map(([value, label]) => <label key={value}><input type="radio" name="overtime-applies" value={value} checked={settings.overtimeApplies === value} onChange={() => update("overtimeApplies", value)} disabled={!loaded} /> {label}</label>)}</fieldset>
-        <Toggle setting="approval" label="Overtime Approval" description="Require approval for overtime hours." />
-        <label>Approval Mode<select value={settings.approvalMode} onChange={(event) => update("approvalMode", event.target.value)} disabled={!loaded || !settings.approval}><option>Manager approval required</option><option>Owner approval required</option><option>No approval required</option></select></label>
-        <Toggle setting="notify" label="Overtime Notifications" description="Notify owners when overtime is worked." />
+        <fieldset disabled={!loaded || !settings.overtimeEnabled}><legend>Overtime Applies To</legend>{[["all", "All employees"], ["nonExempt", "Non-exempt employees only"], ["custom", "Custom"]].map(([value, label]) => <label key={value}><input type="radio" name="overtime-applies" value={value} checked={settings.overtimeApplies === value} onChange={() => update("overtimeApplies", value)} /> {label}</label>)}</fieldset>
+        <Toggle setting="approval" label="Overtime Approval" description="Require approval for overtime hours." disabled={!settings.overtimeEnabled} />
+        <label>Approval Mode<select value={settings.approvalMode} onChange={(event) => update("approvalMode", event.target.value)} disabled={!loaded || !settings.overtimeEnabled || !settings.approval}><option>Manager approval required</option><option>Owner approval required</option><option>No approval required</option></select></label>
+        <Toggle setting="notify" label="Overtime Notifications" description="Notify owners when overtime is worked." disabled={!settings.overtimeEnabled} />
       </div></section>
       <section className="pay-settings-card"><h2>Premium Pay</h2><div className="pay-settings-grid">
-        <label>Holiday Pay<select value={settings.holidayPay} onChange={(event) => update("holidayPay", event.target.value)} disabled={!loaded}><option>2x</option><option>1.5x</option><option>None</option></select></label>
-        <label>Weekend Premium<select value={settings.weekendPremium} onChange={(event) => update("weekendPremium", event.target.value)} disabled={!loaded}><option>None</option><option>1.5x</option></select></label>
-        <label>Night Shift Differential<input value={settings.nightShiftDifferential} onChange={(event) => update("nightShiftDifferential", event.target.value)} disabled={!loaded} /></label>
+        <Toggle setting="holidayPayEnabled" label="Do you offer holiday pay?" description={settings.holidayPayEnabled ? "Yes. Holiday premium pay is active." : "No. Holiday premium pay is turned off."} />
+        <label>Holiday Pay Rate<select value={settings.holidayPay} onChange={(event) => update("holidayPay", event.target.value)} disabled={!loaded || !settings.holidayPayEnabled}><option>2x</option><option>1.5x</option><option>Regular rate</option></select></label>
+        <Toggle setting="weekendPremiumEnabled" label="Do you offer extra weekend pay?" description={settings.weekendPremiumEnabled ? "Yes. Weekend premium pay is active." : "No. Weekend premium pay is turned off."} />
+        <label>Weekend Premium Rate<select value={settings.weekendPremium} onChange={(event) => update("weekendPremium", event.target.value)} disabled={!loaded || !settings.weekendPremiumEnabled}><option>1.25x</option><option>1.5x</option><option>2x</option></select></label>
+        <Toggle setting="nightShiftDifferentialEnabled" label="Do you offer a night-shift differential?" description={settings.nightShiftDifferentialEnabled ? "Yes. Night-shift premium pay is active." : "No. Night-shift premium pay is turned off."} />
+        <label>Night Shift Differential<input value={settings.nightShiftDifferential} onChange={(event) => update("nightShiftDifferential", event.target.value)} disabled={!loaded || !settings.nightShiftDifferentialEnabled} /></label>
       </div></section>
       <div className="pay-info-banner"><div><strong>{dirty ? "Unsaved changes" : saveStatusLabel(saving, loaded, error)}</strong><p>{dirty ? "Your changes will auto-save shortly, or use Save Changes now." : "These settings are stored in the shared workspace database."}</p></div><button className="primary-button" type="submit" disabled={!loaded || saving}>{saving ? "Saving..." : "Save Changes"}</button></div>
     </form>

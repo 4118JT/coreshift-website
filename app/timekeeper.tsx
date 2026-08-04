@@ -9,7 +9,7 @@ import PersistentPayHistoryView from "./pay-history-view";
 
 declare global {
   interface Window {
-    Plaid?: { create: (config: { token: string; onSuccess: (publicToken: string, metadata: { institution?: { name?: string; institution_id?: string } }) => void | Promise<void>; onExit?: () => void }) => { open: () => void } };
+    Plaid?: { create: (config: { token: string; onSuccess: (publicToken: string, metadata: { institution?: { name?: string; institution_id?: string }; accounts?: Array<{ id?: string; name?: string; mask?: string; type?: string; subtype?: string }> }) => void | Promise<void>; onExit?: () => void }) => { open: () => void } };
   }
 }
 
@@ -792,7 +792,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
           {view === "messages" && <PageErrorBoundary><Messages viewer={viewer} employees={employees} /></PageErrorBoundary>}
           {view === "documents" && <DocumentsLive flash={flash} />}
           {view === "settings" && <PageErrorBoundary><Settings flash={flash} businessName={viewer.businessName} ownerName={viewer.displayName} ownerEmail={viewer.email ?? ""} /></PageErrorBoundary>}
-          {view === "employee-home" && <EmployeeHome employee={activeEmployee} now={now} toggleClock={toggleClock} />}
+          {view === "employee-home" && <><EmployeeHome employee={activeEmployee} now={now} toggleClock={toggleClock} /><PlaidConnectCard flash={flash} /></>}
           {view === "my-hours" && <MyHours employee={employees[0]} />}
           {view === "my-schedule" && <MySchedule employee={employees[0]} />}
           {view === "profile" && <Profile employee={employees[0]} viewer={viewer} logOut={logOut} flash={flash} />}
@@ -999,9 +999,9 @@ function PlaidConnectCard({ flash }: { flash: (message: string) => void }) {
   const [institution, setInstitution] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
-    fetch("/api/plaid/status").then((response) => response.ok ? response.json() : null).then((data: { connected?: boolean; item?: { institutionName?: string | null } } | null) => {
+    fetch("/api/plaid/status").then((response) => response.ok ? response.json() : null).then((data: { connected?: boolean; account?: { institutionName?: string | null } } | null) => {
       setStatus(data?.connected ? "connected" : "disconnected");
-      setInstitution(data?.item?.institutionName ?? null);
+      setInstitution(data?.account?.institutionName ?? null);
     }).catch(() => setStatus("disconnected"));
   }, []);
   async function connect() {
@@ -1016,8 +1016,8 @@ function PlaidConnectCard({ flash }: { flash: (message: string) => void }) {
         });
       }
       if (!window.Plaid) throw new Error("Plaid Link is unavailable.");
-      const handler = window.Plaid.create({ token: data.linkToken, onSuccess: async (publicToken: string, metadata: { institution?: { name?: string; institution_id?: string } }) => {
-        const exchange = await fetch("/api/plaid/exchange-token", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicToken, institutionName: metadata.institution?.name, institutionId: metadata.institution?.institution_id }) });
+      const handler = window.Plaid.create({ token: data.linkToken, onSuccess: async (publicToken: string, metadata: { institution?: { name?: string; institution_id?: string }; accounts?: Array<{ id?: string; name?: string; mask?: string; type?: string; subtype?: string }> }) => {
+        const exchange = await fetch("/api/plaid/exchange-token", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicToken, institution: metadata.institution, account: metadata.accounts?.[0] }) });
         const result = await exchange.json() as { error?: string; institutionName?: string | null };
         if (!exchange.ok) throw new Error(result.error || "Could not save the connection.");
         setInstitution(result.institutionName ?? metadata.institution?.name ?? null); setStatus("connected"); flash("Bank account connected securely through Plaid.");
@@ -1025,8 +1025,44 @@ function PlaidConnectCard({ flash }: { flash: (message: string) => void }) {
       handler.open();
     } catch (error) { flash(error instanceof Error ? error.message : "Unable to connect bank account."); setBusy(false); }
   }
-  async function disconnect() { setBusy(true); await fetch("/api/plaid/disconnect", { method: "DELETE" }); setInstitution(null); setStatus("disconnected"); setBusy(false); flash("Bank connection removed."); }
+  async function disconnect() { setBusy(true); await fetch("/api/plaid/disconnect", { method: "POST" }); setInstitution(null); setStatus("disconnected"); setBusy(false); flash("Bank connection removed."); }
   return <article className="panel plaid-card"><div><span className="payroll-icon green">$</span><div><h2>Bank connection</h2><p>{status === "connected" ? `${institution || "Bank account"} connected through Plaid` : "Connect a bank account to prepare secure payroll payouts."}</p></div></div>{status === "connected" ? <button className="secondary-button" type="button" disabled={busy} onClick={disconnect}>Disconnect</button> : <button className="primary-button" type="button" disabled={busy || status === "loading"} onClick={connect}>{busy ? "Connecting…" : "Connect bank account"}</button>}<small>Plaid keeps your bank credentials in its secure connection flow. CoreShift never receives your bank password.</small></article>;
+}
+
+function PlaidTransferPanel({ rows, periodStart, periodEnd, flash }: { rows: Array<{ employee: Employee; estimatedCents: number }>; periodStart: number; periodEnd: number; flash: (message: string) => void }) {
+  const [readiness, setReadiness] = useState<{ configured: boolean; environment: string; linkedEmployeeIds: number[]; transfers: Array<{ status?: string }> } | null>(null);
+  const [sending, setSending] = useState(false);
+  const load = () => fetch("/api/plaid/readiness", { cache: "no-store" })
+    .then(async (response) => { const data = await response.json(); if (!response.ok) throw new Error(data?.error || "Could not load Plaid."); setReadiness(data); })
+    .catch(() => setReadiness(null));
+  useEffect(() => { load(); }, []);
+  const linked = new Set(readiness?.linkedEmployeeIds || []);
+  const payable = rows.filter((row) => row.estimatedCents > 0).map((row) => ({
+    employeeId: row.employee.id,
+    employeeName: row.employee.name,
+    amountCents: row.estimatedCents,
+    periodStart: new Date(periodStart).toISOString().slice(0, 10),
+    periodEnd: new Date(periodEnd).toISOString().slice(0, 10),
+  }));
+  const missing = payable.filter((item) => !linked.has(item.employeeId));
+  async function send() {
+    if (!readiness?.configured) return flash("Plaid credentials and transfer approval are still required.");
+    if (!payable.length) return flash("There is no payroll amount to send.");
+    if (missing.length) return flash(`${missing.length} employee${missing.length === 1 ? "" : "s"} must connect a bank account first.`);
+    const total = payable.reduce((sum, item) => sum + item.amountCents, 0) / 100;
+    if (!window.confirm(`Send ${total.toLocaleString("en-US", { style: "currency", currency: "USD" })} to ${payable.length} employee${payable.length === 1 ? "" : "s"} through Plaid?`)) return;
+    setSending(true);
+    try {
+      const response = await fetch("/api/plaid/transfers", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ confirmation: "SEND_PAYROLL", items: payable }) });
+      const data = await response.json();
+      if (!response.ok && !data?.sent) throw new Error(data?.error || data?.results?.[0]?.error || "Plaid could not send payroll.");
+      flash(`${data.sent} transfer${data.sent === 1 ? "" : "s"} submitted${data.failed ? `; ${data.failed} failed` : ""}. Employees are marked paid only after settlement.`);
+      load();
+    } catch (error) { flash(error instanceof Error ? error.message : "Plaid could not send payroll."); }
+    finally { setSending(false); }
+  }
+  const latest = readiness?.transfers?.[0]?.status;
+  return <article className="panel plaid-card"><div><span className="payroll-icon green">+</span><div><h2>Direct deposit</h2><p>{readiness?.configured ? `${payable.length - missing.length} of ${payable.length} payable employees ready` : "Plaid transfer setup needs production credentials and approval."}</p></div></div><div>{missing.length > 0 && <small>{missing.map((item) => item.employeeName).join(", ")} still need to connect an account.</small>}{latest && <small>Latest status: <b>{latest.replaceAll("_", " ")}</b></small>}<button className="primary-button" type="button" disabled={sending || !readiness?.configured || missing.length > 0 || !payable.length} onClick={send}>{sending ? "Sending securely..." : "Review and send payroll"}</button></div><small>Transfers remain pending until Plaid confirms settlement. Use "Mark paid" only for payments made outside Plaid.</small></article>;
 }
 
 function payrollPeriodFor(date: Date, settings: { frequency: string; payPeriodStarts: string }) {
@@ -1079,13 +1115,32 @@ function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (mess
       setPeriodEmployeeReport(Object.fromEntries(report.map((row) => [row.id, row])));
     }).catch(() => {});
   }, [payrollPeriod.start, payrollPeriod.end]);
-  function setPaid(employeeId: number, employeeName: string) {
-    setPaidIds((current) => {
-      if (current.includes(employeeId)) { flash(`${employeeName}'s payment is already recorded.`); return current; }
-      const next = [...current, employeeId];
-      flash(`${employeeName} marked as paid.`);
-      return next;
+  async function undoManualPayments(employeeIds: number[]) {
+    const response = await fetch("/api/payroll/payments", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ employeeIds, periodStart: payrollPeriod.start, periodEnd: payrollPeriod.end }),
     });
+    const payload = await response.json().catch(() => null) as { removed?: number[]; error?: string } | null;
+    if (!response.ok) throw new Error(payload?.error ?? "The payment could not be undone.");
+    return payload?.removed ?? [];
+  }
+  async function setPaid(employeeId: number, employeeName: string) {
+    if (paidIds.includes(employeeId)) {
+      if (!window.confirm(`Undo the manual paid status for ${employeeName}?`)) return;
+      try {
+        const removed = await undoManualPayments([employeeId]);
+        if (!removed.includes(employeeId)) return flash("Only manual payroll approvals can be undone here.");
+        persistedPaidIds.current.delete(employeeId);
+        setPaidIds((current) => current.filter((id) => id !== employeeId));
+        setPeriodEmployeeReport((current) => current[employeeId] ? { ...current, [employeeId]: { ...current[employeeId], paidCents: 0 } } : current);
+        flash(`${employeeName}'s paid status was undone.`);
+      } catch (error) { flash(error instanceof Error ? error.message : "The payment could not be undone."); }
+      return;
+    }
+    if (!window.confirm(`Mark ${employeeName} as paid for this payroll period?`)) return;
+    setPaidIds((current) => [...current, employeeId]);
+    flash(`${employeeName} marked as paid.`);
   }
   const rows = employees.filter((employee) => employee.name.toLowerCase().includes(query.toLowerCase())).map((employee) => {
     const reportRow = periodEmployeeReport[employee.id];
@@ -1099,6 +1154,29 @@ function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (mess
   const totalOvertime = rows.reduce((sum, row) => sum + row.overtimeMinutes, 0);
   const estimatedCost = rows.reduce((sum, row) => sum + row.estimatedCents, 0);
   const paidRows = rows.filter((row) => paidIds.includes(row.employee.id));
+  const allRowsPaid = rows.length > 0 && rows.every((row) => paidIds.includes(row.employee.id));
+  async function toggleAllPaid() {
+    const employeeIds = rows.map((row) => row.employee.id);
+    if (allRowsPaid) {
+      if (!window.confirm("Undo manual paid status for everyone in this payroll period?")) return;
+      try {
+        const removed = await undoManualPayments(employeeIds);
+        if (!removed.length) return flash("No manual payroll approvals could be undone.");
+        const removedSet = new Set(removed);
+        removed.forEach((id) => persistedPaidIds.current.delete(id));
+        setPaidIds((current) => current.filter((id) => !removedSet.has(id)));
+        setPeriodEmployeeReport((current) => Object.fromEntries(Object.entries(current).map(([id, report]) => [
+          id,
+          removedSet.has(Number(id)) ? { ...report, paidCents: 0 } : report,
+        ])));
+        flash(`${removed.length} manual payment${removed.length === 1 ? "" : "s"} undone.`);
+      } catch (error) { flash(error instanceof Error ? error.message : "Payroll payments could not be undone."); }
+      return;
+    }
+    if (!window.confirm(`Approve and mark ${rows.length} employee${rows.length === 1 ? "" : "s"} as paid?`)) return;
+    setPaidIds((current) => [...new Set([...current, ...employeeIds])]);
+    flash("Payroll approved. Payments are being recorded.");
+  }
   useEffect(() => {
     const newlyPaid = paidIds.filter((id) => !persistedPaidIds.current.has(id));
     if (!newlyPaid.length) return;
@@ -1151,8 +1229,9 @@ function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (mess
       <article className="panel payroll-kpi"><span className="payroll-icon orange">▣</span><small>Est. Payroll Cost</small><strong>{money(estimatedCost)}</strong><em>Based on recorded hours</em><button className="text-button" type="button" onClick={() => flash("Cost breakdown opened.")}>View cost breakdown →</button></article>
     </div>
     <PlaidConnectCard flash={flash} />
+    <PlaidTransferPanel rows={rows} periodStart={payrollPeriod.start} periodEnd={payrollPeriod.end} flash={flash} />
     <div className="payroll-layout">
-      <article className="panel payroll-employees"><div className="payroll-section-head"><div><h2>Employees in This Payroll ({rows.length})</h2></div><div className="payroll-head-actions"><button className="secondary-button" type="button" onClick={() => flash("Payroll editor opened.")}>✎ Edit payroll</button><button className="primary-button" type="button" onClick={() => { const ids = rows.map((row) => row.employee.id); setPaidIds(ids); window.localStorage.setItem("coreshift-payroll-paid", JSON.stringify(ids)); flash("Payroll approved and all employees marked paid."); }}>＋ Approve &amp; Pay</button></div></div><div className="payroll-filter-row"><label className="documents-search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search employees..." /></label><select defaultValue="All Departments"><option>All Departments</option><option>Operations</option><option>Front of House</option></select><select defaultValue="All Employment Types"><option>All Employment Types</option><option>Hourly</option><option>Salaried</option></select><button className="secondary-button" type="button" onClick={() => flash("Payroll filters opened.")}>☷ Filters</button></div><div className="payroll-table payroll-table-head"><span>Employee</span><span>Pay Rate</span><span>Regular Hours</span><span>Overtime Hours</span><span>Total Hours</span><span>Est. Pay</span><span>Status</span></div>{rows.map((row) => { const paid = paidIds.includes(row.employee.id); return <div className="payroll-table" key={row.employee.id}><div className="payroll-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><span>{formatHours(row.regularMinutes)}</span><span>{formatHours(row.overtimeMinutes)}</span><span>{formatHours(row.totalMinutes)}</span><strong>{money(row.estimatedCents)}</strong><button className={`payroll-status ${paid ? "paid" : ""}`} type="button" onClick={() => setPaid(row.employee.id, row.employee.name)}>{paid ? "Paid" : "Mark paid"}</button></div>; })}{!rows.length && <EmptyState title="No payroll employees" message="Employees and recorded hours will appear here." />}<div className="payroll-table-footer">Showing {rows.length} employees <span>‹　<b>1</b>　›</span></div></article>
+      <article className="panel payroll-employees"><div className="payroll-section-head"><div><h2>Employees in This Payroll ({rows.length})</h2></div><div className="payroll-head-actions"><button className="secondary-button" type="button" onClick={() => flash("Payroll editor opened.")}>✎ Edit payroll</button><button className="primary-button" type="button" onClick={toggleAllPaid}>{allRowsPaid ? "Undo paid" : "＋ Approve & Pay"}</button></div></div><div className="payroll-filter-row"><label className="documents-search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search employees..." /></label><select defaultValue="All Departments"><option>All Departments</option><option>Operations</option><option>Front of House</option></select><select defaultValue="All Employment Types"><option>All Employment Types</option><option>Hourly</option><option>Salaried</option></select><button className="secondary-button" type="button" onClick={() => flash("Payroll filters opened.")}>☷ Filters</button></div><div className="payroll-table payroll-table-head"><span>Employee</span><span>Pay Rate</span><span>Regular Hours</span><span>Overtime Hours</span><span>Total Hours</span><span>Est. Pay</span><span>Status</span></div>{rows.map((row) => { const paid = paidIds.includes(row.employee.id); return <div className="payroll-table" key={row.employee.id}><div className="payroll-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><span>{formatHours(row.regularMinutes)}</span><span>{formatHours(row.overtimeMinutes)}</span><span>{formatHours(row.totalMinutes)}</span><strong>{money(row.estimatedCents)}</strong><button className={`payroll-status ${paid ? "paid" : ""}`} type="button" onClick={() => setPaid(row.employee.id, row.employee.name)}>{paid ? "Paid" : "Mark paid"}</button></div>; })}{!rows.length && <EmptyState title="No payroll employees" message="Employees and recorded hours will appear here." />}<div className="payroll-table-footer">Showing {rows.length} employees <span>‹　<b>1</b>　›</span></div></article>
       <aside className="payroll-side"><article className="panel payroll-summary-card"><div className="panel-head"><div><h2>Payroll Summary</h2></div><button className="text-button" type="button" onClick={() => flash("Payroll breakdown opened.")}>View full breakdown →</button></div><dl><div><dt>Total Regular Hours</dt><dd>{formatHours(totalRegular)}</dd></div><div><dt>Total Overtime Hours</dt><dd>{formatHours(totalOvertime)}</dd></div><div><dt>Gross Payroll</dt><dd>{money(estimatedCost)}</dd></div><div><dt>Employee Taxes (Est.)</dt><dd>—</dd></div><div><dt>Employer Taxes (Est.)</dt><dd>—</dd></div><div className="payroll-total"><dt>Total Payroll Cost</dt><dd>{money(estimatedCost)}</dd></div></dl><div className="payroll-donut" /><div className="payroll-key"><span><i className="purple" />Gross wages <b>{money(estimatedCost)}</b></span><span><i className="blue" />Employee taxes <b>—</b></span><span><i className="green" />Employer taxes <b>—</b></span></div></article><article className="panel upcoming-payroll"><div className="panel-head"><h2>Upcoming Payroll</h2></div>{upcomingPayrolls.map((period, index) => <button type="button" key={period.label} onClick={() => flash(period.label + " opened.")}><span>$</span><div><strong>{period.label} <em>{paySchedule.frequency}</em></strong><small>Pay Date: {period.payDate}</small></div><b>{index === 0 ? money(estimatedCost) : "$0.00"} &gt;</b></button>)}<button className="text-button" type="button" onClick={() => flash("All payrolls opened.")}>View all payrolls →</button></article><article className="panel payroll-shortcuts"><h2>Payroll Shortcuts</h2><div>{["Add Bonus", "Reimburse Employee", "Manage Deductions", "Payroll Settings"].map((item) => <button type="button" key={item} onClick={() => flash(`${item} opened.`)}><span>✦</span>{item}</button>)}</div></article></aside>
     </div>
     </>}

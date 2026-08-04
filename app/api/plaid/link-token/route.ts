@@ -1,25 +1,21 @@
-import { ownerViewer, plaidConfig, plaidError } from "../_shared";
+import { NextResponse } from "next/server";
+import { currentPlaidViewer, plaidConfig, plaidError, plaidRequest, viewerSubject } from "../_shared";
 
 export async function POST() {
-  const auth = await ownerViewer();
-  if ("error" in auth) return auth.error;
-  const config = plaidConfig();
-  if (!config.clientId || !config.secret) return plaidError("Plaid is not configured yet. Add PLAID_CLIENT_ID and PLAID_SECRET in the hosting environment.");
-  const response = await fetch(`${config.host}/link/token/create`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      client_id: config.clientId,
-      secret: config.secret,
-      client_name: "CoreShift",
-      user: { client_user_id: auth.viewer.businessId },
-      products: ["auth"],
+  try {
+    const viewer = await currentPlaidViewer();
+    if (viewer instanceof NextResponse) return viewer;
+    const config = plaidConfig();
+    if (!config.configured) return NextResponse.json({ error: "Plaid is not fully configured yet." }, { status: 503 });
+    const subject = viewerSubject(viewer);
+    const payload = await plaidRequest<{ link_token: string }>("/link/token/create", {
+      user: { client_user_id: `${viewer.businessId}:${subject.subjectType}:${subject.subjectId}` },
+      client_name: "CoreShift Payroll",
+      products: ["transfer"],
       country_codes: ["US"],
       language: "en",
-    }),
-  });
-  if (!response.ok) return plaidError(`Plaid could not create a connection session (${response.status}).`, 502);
-  const data = await response.json() as { link_token?: string };
-  if (!data.link_token) return plaidError("Plaid returned an invalid connection session.", 502);
-  return Response.json({ linkToken: data.link_token, environment: config.environment });
+      ...(config.webhook ? { webhook: config.webhook } : {}),
+    });
+    return NextResponse.json({ linkToken: payload.link_token });
+  } catch (error) { return plaidError(error); }
 }

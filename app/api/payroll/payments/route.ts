@@ -33,3 +33,28 @@ export async function POST(request: Request) {
   if (inserts.length) await db.batch(inserts);
   return Response.json({ recorded });
 }
+
+export async function DELETE(request: Request) {
+  const viewer = await getViewer();
+  if (viewer.access !== "owner") return Response.json({ error: "Owner access required" }, { status: 403 });
+  const body = await request.json() as { employeeIds?: number[]; periodStart?: number; periodEnd?: number };
+  const periodStart = Number(body.periodStart);
+  const periodEnd = Number(body.periodEnd);
+  const employeeIds = Array.isArray(body.employeeIds)
+    ? [...new Set(body.employeeIds.map(Number).filter((id) => Number.isInteger(id) && id > 0))].slice(0, 250)
+    : [];
+  if (!employeeIds.length || !Number.isFinite(periodStart) || !Number.isFinite(periodEnd) || periodEnd <= periodStart) {
+    return Response.json({ error: "Valid employees and payroll period dates are required." }, { status: 400 });
+  }
+  await ensureDatabase();
+  const db = database();
+  const removed: number[] = [];
+  for (const employeeId of employeeIds) {
+    const result = await db.prepare(`DELETE FROM employee_payments
+      WHERE employee_id = ? AND paid_at >= ? AND paid_at <= ? AND note = 'Payroll approval'
+      AND employee_id IN (SELECT id FROM employees WHERE business_id = ?)`)
+      .bind(employeeId, periodStart, periodEnd, viewer.businessId).run();
+    if (Number(result.meta?.changes ?? 0) > 0) removed.push(employeeId);
+  }
+  return Response.json({ removed });
+}

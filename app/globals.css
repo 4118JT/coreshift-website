@@ -2637,3 +2637,17 @@ html[data-theme="dark"] .messages-reference .message-day-divider{border-color:#3
 .pay-settings-card .pay-settings-grid input:disabled,.pay-settings-card .pay-settings-grid select:disabled{opacity:.45;cursor:not-allowed;background:#f1f2f5}
 .pay-settings-card .pay-settings-grid label:has(input:disabled){opacity:.55}
 .plaid-card{display:flex;align-items:center;gap:16px;padding:16px 20px;background:#f7fbf9;border-color:#d9efe1}.plaid-card>div{display:flex;align-items:center;gap:12px;flex:1}.plaid-card h2{margin:0 0 4px;font-size:15px}.plaid-card p{margin:0;color:#65718a;font-size:12px}.plaid-card small{color:#72809a;font-size:11px;max-width:310px}.plaid-card .primary-button,.plaid-card .secondary-button{white-space:nowrap}@media(max-width:700px){.plaid-card{align-items:flex-start;flex-wrap:wrap}.plaid-card small{flex-basis:100%;max-width:none}}
+.pay-settings-grid label:has(input:disabled),
+.pay-settings-grid label:has(select:disabled),
+.pay-settings-grid fieldset:disabled {
+  opacity: 0.42;
+  filter: grayscale(0.35);
+  cursor: not-allowed;
+  transition: opacity 180ms ease, filter 180ms ease;
+}
+
+.pay-settings-grid label:has(input:disabled) input,
+.pay-settings-grid label:has(select:disabled) select,
+.pay-settings-grid fieldset:disabled input {
+  cursor: not-allowed;
+}

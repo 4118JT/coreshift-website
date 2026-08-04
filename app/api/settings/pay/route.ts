@@ -25,8 +25,11 @@ const defaults = {
   approvalMode: "Manager approval required",
   eligibility: "hourly",
   holidayPay: "2x",
+  holidayPayEnabled: true,
   weekendPremium: "None",
+  weekendPremiumEnabled: false,
   nightShiftDifferential: "$2.00 / hr",
+  nightShiftDifferentialEnabled: true,
 };
 
 const key = (businessId: string) => `pay_settings:${businessId}`;
