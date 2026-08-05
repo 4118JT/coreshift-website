@@ -10,15 +10,18 @@ export function LoginForm({ nextPath = "/" }: { initialMode?: "owner" | "employe
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [signInIdentifier, setSignInIdentifier] = useState("");
 
   const go = (next: Screen) => { setScreen(next); setError(""); setShowPassword(false); };
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); setBusy(true); setError("");
     const form = new FormData(event.currentTarget);
+    const identifier = String(form.get("identifier") ?? "").trim();
+    const employeeCodeLogin = /^\d{8}$/.test(identifier);
     const response = await fetch("/api/session/login", {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ mode: "auto", identifier: form.get("identifier"), secret: form.get("secret") }),
+      body: JSON.stringify({ mode: "auto", identifier, secret: employeeCodeLogin ? identifier : form.get("secret") }),
     }).catch(() => null);
     if (!response?.ok) { const result = response ? await response.json().catch(() => null) as { error?: string } | null : null; setError(result?.error ?? "Unable to sign in. Please try again."); setBusy(false); return; }
     window.location.assign(nextPath);
@@ -65,8 +68,8 @@ export function LoginForm({ nextPath = "/" }: { initialMode?: "owner" | "employe
       </form></> : screen === "join" ? <><div className="login-form-heading"><strong>Create employee account</strong><span>Your owner provides the company code. Choose your own private password.</span></div><form className="login-form" onSubmit={joinEmployee}>
         <label>8-digit company code<input name="companyCode" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{8}" maxLength={8} placeholder="12345678" required /></label><label>Full name<input name="name" autoComplete="name" placeholder="Enter your name" maxLength={100} required /></label><label>Work email<input name="email" type="email" autoComplete="email" placeholder="you@example.com" maxLength={254} required /></label><label>Create password<input name="password" type={showPassword ? "text" : "password"} autoComplete="new-password" placeholder="At least 10 characters" minLength={10} required /></label><label>Confirm password<input name="confirmPassword" type={showPassword ? "text" : "password"} autoComplete="new-password" placeholder="Enter the password again" minLength={10} required /></label>
         {error && <p className="login-error" role="alert">{error}</p>}<label className="password-visibility"><input type="checkbox" checked={showPassword} onChange={(event) => setShowPassword(event.target.checked)} /> Show passwords</label><button className="login-submit" type="submit" disabled={busy}>{busy ? "Joining company…" : "Create employee account"}</button>
-      </form></> : screen === "signin" ? <><div className="login-form-heading"><strong>Sign in</strong><span>Use your email and password, or your employee ID and access code.</span></div><form className="login-form" onSubmit={submit}>
-        <label>Email or 8-digit employee access code<input name="identifier" autoCapitalize="none" autoComplete="username" placeholder="you@example.com or 12345678" required /></label><label>Password or access code<input name="secret" type={showPassword ? "text" : "password"} autoComplete="current-password" placeholder="Enter your password" required /></label>
+      </form></> : screen === "signin" ? <><div className="login-form-heading"><strong>Sign in</strong><span>Employees can enter their 8-digit code by itself. Email sign-in still uses a password.</span></div><form className="login-form" onSubmit={submit}>
+        <label>Email or 8-digit employee code<input name="identifier" value={signInIdentifier} onChange={(event) => setSignInIdentifier(event.target.value.replace(/^\s+|\s+$/g, "").slice(0, 254))} inputMode={/^\d*$/.test(signInIdentifier) ? "numeric" : "email"} autoCapitalize="none" autoComplete="username" placeholder="you@example.com or 12345678" required /></label>{!/^\d{8}$/.test(signInIdentifier) && <label>Password<input name="secret" type={showPassword ? "text" : "password"} autoComplete="current-password" placeholder="Enter your password" required /></label>}
         {error && <p className="login-error" role="alert">{error}</p>}<label className="password-visibility"><input type="checkbox" checked={showPassword} onChange={(event) => setShowPassword(event.target.checked)} /> Show password</label><button className="login-submit" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button><div className="login-recovery-links"><Link className="forgot-password-link" href="/recover-owner">Forgot password?</Link><Link className="forgot-password-link" href="/recover-employee">Employee recovery</Link></div>
       </form></> : null}
 

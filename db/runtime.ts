@@ -106,6 +106,32 @@ export function ensureDatabase() {
         body TEXT NOT NULL,
         created_at INTEGER NOT NULL
       )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS message_reactions (
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        business_id TEXT NOT NULL,
+        reactor_type TEXT NOT NULL,
+        reactor_id INTEGER NOT NULL DEFAULT 0,
+        emoji TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (message_id, reactor_type, reactor_id, emoji)
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS message_reads (
+        message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        business_id TEXT NOT NULL,
+        reader_type TEXT NOT NULL,
+        reader_id INTEGER NOT NULL DEFAULT 0,
+        reader_name TEXT NOT NULL,
+        read_at INTEGER NOT NULL,
+        PRIMARY KEY (message_id, reader_type, reader_id)
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS message_presence (
+        business_id TEXT NOT NULL,
+        user_type TEXT NOT NULL,
+        user_id INTEGER NOT NULL DEFAULT 0,
+        user_name TEXT NOT NULL,
+        last_seen INTEGER NOT NULL,
+        PRIMARY KEY (business_id, user_type, user_id)
+      )`),
       db.prepare(`CREATE TABLE IF NOT EXISTS plaid_items (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         business_id TEXT NOT NULL UNIQUE REFERENCES businesses(id),
@@ -131,6 +157,9 @@ export function ensureDatabase() {
     for (const statement of [
       "ALTER TABLE employees ADD COLUMN phone TEXT",
       "ALTER TABLE messages ADD COLUMN conversation_id TEXT NOT NULL DEFAULT 'managers'",
+      "ALTER TABLE messages ADD COLUMN reply_to_id INTEGER REFERENCES messages(id)",
+      "ALTER TABLE messages ADD COLUMN image_data TEXT",
+      "ALTER TABLE messages ADD COLUMN image_name TEXT",
       "ALTER TABLE employees ADD COLUMN display_name TEXT",
       "ALTER TABLE employees ADD COLUMN availability TEXT",
       "ALTER TABLE employees ADD COLUMN desired_hours INTEGER NOT NULL DEFAULT 0",

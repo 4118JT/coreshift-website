@@ -23,7 +23,7 @@ export async function POST(request: Request) {
   // mode is omitted or set to auto.
   const mode = body.mode === "employee" ? "employee" : body.mode === "owner" ? "owner" : "auto";
   const identifier = body.identifier?.trim().toLowerCase() ?? "";
-  const secret = body.secret?.trim() ?? "";
+  const secret = body.secret?.trim() || (/^\d{8}$/.test(identifier) ? identifier : "");
   const businessId = body.businessId?.trim() ?? "";
   if (!identifier || !secret) {
     return Response.json({ error: "Enter your email and password or access code." }, { status: 400 });

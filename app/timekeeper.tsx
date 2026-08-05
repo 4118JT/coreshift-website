@@ -4,6 +4,7 @@ import Link from "next/link";
 import { Component, ErrorInfo, ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { Viewer } from "../db/viewer";
 import "./messages-motion.css";
+import EmployeePayStub from "./employee-paystub";
 import PersistentPayOvertimeSettingsPage from "./pay-overtime-settings";
 import PersistentPayHistoryView from "./pay-history-view";
 
@@ -38,6 +39,11 @@ type Employee = {
   totalMinutes?: number;
   totalShifts?: number;
   currentPayPeriodEarningsCents?: number;
+  currentPayPeriodMinutes?: number;
+  currentPayPeriodStart?: number;
+  currentPayPeriodEnd?: number;
+  payFrequency?: string;
+  nextPayDate?: number;
   createdAt?: number | null;
 };
 
@@ -476,6 +482,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
+  const [unreadMessages, setUnreadMessages] = useState(0);
   const [darkMode, setDarkMode] = useState(false);
   const [messagingAllowed, setMessagingAllowed] = useState(true);
   const [employeeControls, setEmployeeControls] = useState<Record<string, boolean> | null>(null);
@@ -541,6 +548,20 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
       window.clearInterval(dataTimer);
     };
   }, [viewer.access, viewer.employeeId]);
+
+  useEffect(() => {
+    if (!messagingAllowed || isDemo) { setUnreadMessages(0); return; }
+    const loadUnreadMessages = async () => {
+      const response = await fetch("/api/messages?list=1", { cache: "no-store" }).catch(() => null);
+      const result = response?.ok ? await response.json().catch(() => null) as { recentConversations?: Array<{ id: string; unread?: number | boolean }> } | null : null;
+      if (!result?.recentConversations) return;
+      setUnreadMessages(result.recentConversations.reduce((total, conversation) => total + Math.max(0, Number(conversation.unread) || 0), 0));
+    };
+    loadUnreadMessages();
+    const timer = window.setInterval(loadUnreadMessages, 6000);
+    window.addEventListener("focus", loadUnreadMessages);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", loadUnreadMessages); };
+  }, [isDemo, messagingAllowed, viewer.businessId, viewer.actorId]);
 
   function toggleDarkMode() {
     setDarkMode((current) => {
@@ -740,7 +761,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
             ...(employeeControls === null || employeeControls["View messages"] || employeeControls["Send direct messages"] || employeeControls["Create group messages"] ? [["messages", "Messages", "✉"] as [ViewName, string, string]] : []),
           ] as Array<[ViewName, string, string]> : navigation).map(([key, label, icon]) => (
             <Link className={view === key ? "nav-item active" : "nav-item"} href={key === "overview" || key === "employee-home" ? "/" : `/${key}`} key={key}>
-              <span aria-hidden="true">{icon}</span>{label}
+              <span aria-hidden="true">{icon}</span>{label}{key === "messages" && unreadMessages > 0 && <span className="nav-unread-badge" aria-label={`${unreadMessages} unread message${unreadMessages === 1 ? "" : "s"}`} title={`${unreadMessages} unread message${unreadMessages === 1 ? "" : "s"}`}>{unreadMessages > 99 ? "99+" : unreadMessages}</span>}
             </Link>
           ))}
           <p className="nav-label reports-label">Insights</p>
@@ -793,7 +814,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
           {view === "documents" && <DocumentsLive flash={flash} />}
           {view === "settings" && <PageErrorBoundary><Settings flash={flash} businessName={viewer.businessName} ownerName={viewer.displayName} ownerEmail={viewer.email ?? ""} /></PageErrorBoundary>}
           {view === "employee-home" && <><EmployeeHome employee={activeEmployee} now={now} toggleClock={toggleClock} /><PlaidConnectCard flash={flash} /></>}
-          {view === "my-hours" && <MyHours employee={employees[0]} />}
+          {view === "my-hours" && <EmployeePayStub employee={employees[0]} />}
           {view === "my-schedule" && <MySchedule employee={employees[0]} />}
           {view === "profile" && <Profile employee={employees[0]} viewer={viewer} logOut={logOut} flash={flash} />}
         </div>
@@ -859,6 +880,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
 
 function DashboardOverview({ employees, working, totalMinutes, dailyMinutes, toggleClock }: { employees: Employee[]; working: Employee[]; totalMinutes: number; dailyMinutes: number[]; toggleClock: (employee: Employee) => void }) {
   const [laborRange, setLaborRange] = useState<"day" | "week" | "month" | "ytd">("week");
+  const [liveLaborSeries, setLiveLaborSeries] = useState<{ labels: string[]; axisLabels: string[]; values: number[] } | null>(null);
   const weeklyCost = employees.reduce((sum, person) => sum + Math.round((person.weeklyMinutes / 60) * (person.hourlyRateCents ?? 0)), 0);
   const monthCost = employees.reduce((sum, person) => sum + Math.round(((person.monthMinutes ?? person.weeklyMinutes * 4.345) / 60) * (person.hourlyRateCents ?? 0)), 0);
   const yearCost = employees.reduce((sum, person) => sum + Math.round(((person.totalMinutes ?? person.monthMinutes ?? person.weeklyMinutes) / 60) * (person.hourlyRateCents ?? 0)), 0);
@@ -867,16 +889,28 @@ function DashboardOverview({ employees, working, totalMinutes, dailyMinutes, tog
   const todayIndex = Math.max(0, Math.min(6, new Date().getDay() - 1));
   const currentMonth = new Date().getMonth();
   const monthLabels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const laborSeries = useMemo(() => {
-    if (laborRange === "week") return { labels: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], values: dailyMinutes.map((minutes) => Math.round((minutes / 60) * (totalMinutes ? weeklyCost / (totalMinutes / 60) : 0))) };
+  const fallbackLaborSeries = useMemo(() => {
+    if (laborRange === "week") return { labels: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], axisLabels: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], values: dailyMinutes.map((minutes) => Math.round((minutes / 60) * (totalMinutes ? weeklyCost / (totalMinutes / 60) : 0))) };
     if (laborRange === "day") {
       const hourly = Math.round(((dailyMinutes[todayIndex] ?? 0) / 60) * (totalMinutes ? weeklyCost / (totalMinutes / 60) : 0));
       const currentHour = new Date().getHours();
-      return { labels: Array.from({ length: 12 }, (_, index) => `${((index + 8) % 12) || 12}${index + 8 < 12 ? "a" : "p"}`), values: Array.from({ length: 12 }, (_, index) => index === Math.max(0, Math.min(11, currentHour - 8)) ? hourly : 0) };
+      const labels = Array.from({ length: 12 }, (_, index) => `${((index + 8) % 12) || 12}${index + 8 < 12 ? "a" : "p"}`);
+      return { labels, axisLabels: labels, values: Array.from({ length: 12 }, (_, index) => index === Math.max(0, Math.min(11, currentHour - 8)) ? hourly : 0) };
     }
-    if (laborRange === "month") return { labels: ["Week 1", "Week 2", "Week 3", "Week 4", "Week 5"], values: [0, 0, 0, 0, monthCost] };
-    return { labels: monthLabels, values: monthLabels.map((_, index) => index === currentMonth ? yearCost : 0) };
+    if (laborRange === "month") return { labels: ["Week 1", "Week 2", "Week 3", "Week 4", "Week 5"], axisLabels: ["Week 1", "Week 2", "Week 3", "Week 4", "Week 5"], values: [0, 0, 0, 0, monthCost] };
+    return { labels: monthLabels, axisLabels: monthLabels, values: monthLabels.map((_, index) => index === currentMonth ? yearCost : 0) };
   }, [laborRange, dailyMinutes, totalMinutes, weeklyCost, monthCost, yearCost, todayIndex, currentMonth]);
+  useEffect(() => {
+    let active = true;
+    const load = () => fetch(`/api/reports/labor-series?range=${laborRange}&offsetMinutes=${new Date().getTimezoneOffset()}`, { cache: "no-store" })
+      .then((response) => response.ok ? response.json() as Promise<{ labels: string[]; axisLabels: string[]; values: number[] }> : Promise.reject())
+      .then((series) => { if (active) setLiveLaborSeries(series); })
+      .catch(() => { if (active) setLiveLaborSeries(null); });
+    setLiveLaborSeries(null); load();
+    const timer = window.setInterval(load, 60_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [laborRange]);
+  const laborSeries = liveLaborSeries ?? fallbackLaborSeries;
   useEffect(() => { const label = document.querySelector<HTMLElement>(".reference-big-money + small"); if (label) label.textContent = `Total labor cost for ${laborRangeLabels[laborRange]}`; }, [laborRange]);
   const attendance = employees.length ? Math.round((employees.filter((person) => person.weeklyMinutes > 0).length / employees.length) * 100) : 0;
   const workingCount = employees.filter((person) => person.status === "clocked_in").length;
@@ -902,9 +936,9 @@ function DashboardOverview({ employees, working, totalMinutes, dailyMinutes, tog
   return <section className="reference-dashboard">
     <div className="reference-dashboard-head"><div><p className="eyebrow">TODAY</p><h2>Good {new Date().getHours() < 12 ? "morning" : new Date().getHours() < 17 ? "afternoon" : "evening"}, {" "}Ivey Carroll. 👋</h2><p>Here’s what’s happening with your team today.</p></div></div>
     <div className="reference-kpis"><article><span className="kpi-icon purple">♙</span><small>Employees Working Now</small><strong>{working.length}</strong><em>of {employees.length} scheduled</em><Link href="/time-clock">View live map →</Link></article><article><span className="kpi-icon green">◷</span><small>Total Hours This Week</small><strong>{formatHours(totalMinutes)}</strong><em>Recorded hours</em><Link href="/reports">View report →</Link></article><article><span className="kpi-icon orange">$</span><small>Labor Cost This Week</small><strong>{moneyValue(weeklyCost)}</strong><em>Based on recorded hours</em><Link href="/reports">View report →</Link></article><article><span className="kpi-icon blue">↗</span><small>Attendance</small><strong>{attendance}%</strong><em>Current week</em><Link href="/reports">View report →</Link></article></div>
-    <div className="reference-three"><article className="reference-panel"><PanelHead title="Today’s Overview" subtitle="Live notifications" /><div className="overview-list"><div>♙ <strong>{working.length}</strong><span>Employees working now</span></div><div>✦ <strong>0</strong><span>Shifts needing coverage</span></div><div>◷ <strong>{workingCount}</strong><span>Active clock-ins</span></div><div>▣ <strong>0</strong><span>Time-off requests pending</span></div></div><Link className="reference-primary" href="/time-clock">View all notifications</Link></article><article className="reference-panel"><PanelHead title="Schedule Snapshot" subtitle="This week" action={<Link className="text-button" href="/schedule">View full schedule →</Link>} /><div className="snapshot-days">{dailyMinutes.map((minutes, index) => <div className={index === new Date().getDay() - 1 ? "selected" : ""} key={index}><small>{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][index]}</small><strong>{minutes ? formatHours(minutes) : "—"}</strong></div>)}</div><div className="snapshot-totals"><span><b>{formatHours(totalMinutes)}</b>Total scheduled</span><span><b>{employees.length}</b>Total shifts</span><span><b className="danger">0</b>Open shifts</span></div><Link className="full-button" href="/schedule">View full schedule →</Link></article><article className="reference-panel labor-card"><PanelHead title="Labor Cost" subtitle={laborRange === "week" ? "Week of current schedule" : laborRangeLabels[laborRange]} action={<select className="labor-range-select" aria-label="Labor cost period" value={laborRange} onChange={(event) => setLaborRange(event.target.value as typeof laborRange)}>{Object.entries(laborRangeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>} /><div className="labor-total-box"><span className="labor-total-icon">♙<b>$</b></span><div><small>Total labor cost</small><strong>{moneyValue(laborCostByRange[laborRange])}</strong><em>Recorded from your team’s hours</em></div></div><div className="labor-chart-heading"><strong>Labor cost over time</strong><span><i /> Labor cost (USD)</span></div><div className="labor-graph"><svg viewBox="0 0 102 68" preserveAspectRatio="none" aria-label="Labor cost trend"><defs><linearGradient id="labor-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7658e8" stopOpacity=".28" /><stop offset="100%" stopColor="#7658e8" stopOpacity=".02" /></linearGradient></defs>{laborGrid.map((grid) => <g key={grid.y}><line x1="12" x2="98" y1={grid.y} y2={grid.y} stroke="#dfe4ee" strokeDasharray="1.5 1.5" /><text x="0" y={grid.y + 1.5} fill="#65728b" fontSize="3.4">${grid.value}</text></g>)}<line x1="12" x2="98" y1="56" y2="56" stroke="#aab4c4" /><path d={laborArea} fill="url(#labor-fill)" /><polyline points={laborPolyline} fill="none" stroke="#624de0" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />{laborCoords.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r="1.7" fill="#624de0" />)}</svg><div className="labor-axis">{laborSeries.labels.map((label) => <span key={label}>{label}</span>)}</div></div><div className="labor-stats"><span><i>◷</i><small>Total hours</small><b>{formatHours(rangeMinutes)}</b></span><span><i>$</i><small>Labor cost / hr</small><b>{moneyValue(Math.round(averageCostPerHour))}</b></span><span><i>↗</i><small>Highest period</small><b>{laborSeries.labels[highestIndex] || "—"}</b></span><span><i>▣</i><small>Lowest period</small><b>{laborSeries.labels[lowestIndex] || "—"}</b></span></div><Link className="text-button" href="/reports">View labor report →</Link></article></div>
+    <div className="reference-three"><article className="reference-panel"><PanelHead title="Today’s Overview" subtitle="Live notifications" /><div className="overview-list"><div>♙ <strong>{working.length}</strong><span>Employees working now</span></div><div>✦ <strong>0</strong><span>Shifts needing coverage</span></div><div>◷ <strong>{workingCount}</strong><span>Active clock-ins</span></div><div>▣ <strong>0</strong><span>Time-off requests pending</span></div></div><Link className="reference-primary" href="/time-clock">View all notifications</Link></article><article className="reference-panel"><PanelHead title="Schedule Snapshot" subtitle="This week" action={<Link className="text-button" href="/schedule">View full schedule →</Link>} /><div className="snapshot-days">{dailyMinutes.map((minutes, index) => <div className={index === new Date().getDay() - 1 ? "selected" : ""} key={index}><small>{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][index]}</small><strong>{minutes ? formatHours(minutes) : "—"}</strong></div>)}</div><div className="snapshot-totals"><span><b>{formatHours(totalMinutes)}</b>Total scheduled</span><span><b>{employees.length}</b>Total shifts</span><span><b className="danger">0</b>Open shifts</span></div><Link className="full-button" href="/schedule">View full schedule →</Link></article><article className="reference-panel labor-card"><PanelHead title="Labor Cost" subtitle={laborRange === "week" ? "Week of current schedule" : laborRangeLabels[laborRange]} action={<select className="labor-range-select" aria-label="Labor cost period" value={laborRange} onChange={(event) => setLaborRange(event.target.value as typeof laborRange)}>{Object.entries(laborRangeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>} /><div className="labor-total-box"><span className="labor-total-icon">♙<b>$</b></span><div><small>Total labor cost</small><strong>{moneyValue(laborCostByRange[laborRange])}</strong><em>Recorded from your team’s hours</em></div></div><div className="labor-chart-heading"><strong>Labor cost over time</strong><span><i /> Labor cost (USD)</span></div><div className="labor-graph"><svg viewBox="0 0 102 68" preserveAspectRatio="none" aria-label="Labor cost trend"><defs><linearGradient id="labor-fill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#7658e8" stopOpacity=".28" /><stop offset="100%" stopColor="#7658e8" stopOpacity=".02" /></linearGradient></defs>{laborGrid.map((grid) => <g key={grid.y}><line x1="12" x2="98" y1={grid.y} y2={grid.y} stroke="#dfe4ee" strokeDasharray="1.5 1.5" /><text x="0" y={grid.y + 1.5} fill="#65728b" fontSize="3.4">${grid.value}</text></g>)}<line x1="12" x2="98" y1="56" y2="56" stroke="#aab4c4" /><path d={laborArea} fill="url(#labor-fill)" /><polyline points={laborPolyline} fill="none" stroke="#624de0" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />{laborCoords.map((point, index) => <circle key={index} cx={point.x} cy={point.y} r="1.7" fill="#624de0" />)}</svg><div className="labor-axis">{laborSeries.axisLabels.map((label, index) => <span key={`${index}-${label}`} style={{ left: `${((laborCoords[index]?.x ?? 12) / 102) * 100}%` }}>{label}</span>)}</div></div><div className="labor-stats"><span><i>◷</i><small>Total hours</small><b>{formatHours(rangeMinutes)}</b></span><span><i>$</i><small>Labor cost / hr</small><b>{moneyValue(Math.round(averageCostPerHour))}</b></span><span><i>↗</i><small>Highest period</small><b>{laborSeries.labels[highestIndex] || "—"}</b></span><span><i>▣</i><small>Lowest period</small><b>{laborSeries.labels[lowestIndex] || "—"}</b></span></div><Link className="text-button" href="/reports">View labor report →</Link></article></div>
     <div className="reference-three"><article className="reference-panel"><PanelHead title="Employee Status" action={<Link className="text-button" href="/team">View team →</Link>} /><div className="status-donut" style={{ background: `conic-gradient(#4db77b 0 ${employees.length ? workingCount / employees.length * 100 : 0}%, #6250df 0 ${employees.length ? (workingCount + breakCount) / employees.length * 100 : 0}%, #f1b25b 0 ${employees.length ? scheduledCount / employees.length * 100 : 0}%, #d8dde4 0)` }}><strong>{employees.length}</strong><span>Total</span></div><div className="status-legend" aria-label="Employee status key"><b>Status key</b><span><i className="status-dot working" />{workingCount} Working now</span><span><i className="status-dot break" />{breakCount} On break</span><span><i className="status-dot out" />{clockedOutCount} Clocked out</span><span><i className="status-dot unscheduled" />{notScheduledCount} Not scheduled</span></div></article><article className="reference-panel"><PanelHead title="Time Off Requests" action={<Link className="text-button" href="/team">View all →</Link>} /><EmptyState title="No pending requests" message="Time-off requests will appear here." /></article><article className="reference-panel"><PanelHead title="Recent Activity" action={<Link className="text-button" href="/time-clock">View all →</Link>} />{working.slice(0, 4).map((person) => <div className="reference-activity" key={person.id}><span className={`avatar ${person.color}`}>{person.initials}</span><strong>{person.name} clocked in</strong><small>{person.clockIn ?? "Recently"}</small></div>)}{!working.length && <EmptyState title="No activity yet" message="Recent activity will appear here." />}</article></div>
-    <div className="reference-bottom"><article className="reference-panel"><PanelHead title="Top Employees" subtitle="This week" /><div className="top-employee-table">{[...employees].sort((a, b) => b.weeklyMinutes - a.weeklyMinutes).slice(0, 5).map((person) => <div key={person.id}><span className={`avatar ${person.color}`}>{person.initials}</span><strong>{person.name}</strong><span>{formatHours(person.weeklyMinutes)}</span><span>{person.hourlyRateCents ? moneyValue(Math.round(person.weeklyMinutes / 60 * person.hourlyRateCents)) : "—"}</span></div>)}</div></article><article className="reference-panel"><PanelHead title="Announcements" action={<button className="text-button">View all →</button>} /><div className="announcement">📣 <div><strong>Team updates</strong><span>Announcements and important updates will appear here.</span></div></div><div className="announcement">▣ <div><strong>Schedule published</strong><span>Employees will see published schedule changes.</span></div></div></article></div>
+    <div className="reference-bottom"><article className="reference-panel"><PanelHead title="Top Employees" subtitle="This week" /><div className="top-employee-table">{[...employees].sort((a, b) => b.weeklyMinutes - a.weeklyMinutes).slice(0, 5).map((person) => <div key={person.id} role="link" tabIndex={0} style={{ cursor: "pointer" }} onClick={() => { window.location.href = `/team?employee=${person.id}`; }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); window.location.href = `/team?employee=${person.id}`; } }}><span className={`avatar ${person.color}`}>{person.initials}</span><strong>{person.name}</strong><span>{formatHours(person.weeklyMinutes)}</span><span>{person.hourlyRateCents ? moneyValue(Math.round(person.weeklyMinutes / 60 * person.hourlyRateCents)) : "—"}</span></div>)}</div></article><article className="reference-panel"><PanelHead title="Announcements" action={<button className="text-button">View all →</button>} /><div className="announcement">📣 <div><strong>Team updates</strong><span>Announcements and important updates will appear here.</span></div></div><div className="announcement">▣ <div><strong>Schedule published</strong><span>Employees will see published schedule changes.</span></div></div></article></div>
   </section>;
 }
 
@@ -1076,6 +1110,30 @@ function payrollPeriodFor(date: Date, settings: { frequency: string; payPeriodSt
   return { start: start.getTime(), end: addDays(start, days).getTime() - 1, days };
 }
 
+type GustoPayrollStatus = { connected: boolean; companyName?: string; companyId?: string; environment?: "Demo" | "Production"; onboardingComplete?: boolean; error?: string };
+
+async function openGustoFlow(flowType: "company_onboarding" | "employee_management" | "run_payroll" | "payroll_history", flash: (message: string) => void) {
+  const popup = window.open("about:blank", "_blank");
+  if (popup) { popup.document.title = "Opening Gusto"; popup.document.body.innerHTML = '<p style="font:16px sans-serif;padding:32px">Opening secure Gusto payroll...</p>'; popup.opener = null; }
+  const response = await fetch("/api/gusto/flows", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ flowType }) }).catch(() => null);
+  const payload = response ? await response.json().catch(() => null) as { url?: string; error?: string; environment?: string } | null : null;
+  if (!response?.ok || !payload?.url) { popup?.close(); flash(payload?.error || "Gusto could not open the payroll workflow."); return false; }
+  if (popup) popup.location.href = payload.url; else window.location.assign(payload.url);
+  flash(`${payload.environment || "Gusto"} workflow opened securely.`);
+  return true;
+}
+
+function GustoPayrollPanel({ flash }: { flash: (message: string) => void }) {
+  const [status, setStatus] = useState<GustoPayrollStatus | null>(null);
+  const [working, setWorking] = useState<string | null>(null);
+  const load = () => fetch("/api/gusto/status", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<GustoPayrollStatus> : Promise.reject()).then(setStatus).catch(() => setStatus({ connected: false, error: "Gusto status could not be loaded." }));
+  useEffect(() => { void load(); }, []);
+  const launch = async (flowType: "company_onboarding" | "employee_management" | "run_payroll" | "payroll_history") => { setWorking(flowType); await openGustoFlow(flowType, flash); setWorking(null); };
+  if (!status) return <article className="panel plaid-card"><div><span className="payroll-icon green">G</span><div><h2>Gusto Payroll</h2><p>Checking the secure payroll connection...</p></div></div></article>;
+  if (!status.connected) return <article className="panel plaid-card"><div><span className="payroll-icon green">G</span><div><h2>Gusto Payroll</h2><p>Connect Gusto before onboarding employees or running payroll.</p></div></div><button className="primary-button" type="button" onClick={() => window.location.assign("/settings?section=integrations")}>Connect Gusto</button><small>CoreShift never stores bank account numbers, tax forms, or Gusto passwords.</small></article>;
+  return <article className="panel plaid-card"><div><span className="payroll-icon green">G</span><div><h2>Gusto Payroll <em>{status.environment || "Connected"}</em></h2><p>{status.onboardingComplete ? `${status.companyName || "Company"} is ready for payroll.` : `${status.companyName || "Company"} still needs Gusto onboarding.`}</p></div></div><div className="integration-live-actions"><button className="secondary-button" type="button" disabled={!!working} onClick={() => void launch("company_onboarding")}>{working === "company_onboarding" ? "Opening..." : status.onboardingComplete ? "Review company setup" : "Complete company setup"}</button><button className="secondary-button" type="button" disabled={!!working} onClick={() => void launch("employee_management")}>{working === "employee_management" ? "Opening..." : "Manage employees"}</button><button className="primary-button" type="button" disabled={!!working || !status.onboardingComplete} onClick={() => void launch("run_payroll")}>{working === "run_payroll" ? "Opening..." : "Review and run payroll"}</button><button className="text-button" type="button" disabled={!!working} onClick={() => void launch("payroll_history")}>Payroll history</button></div>{status.error && <small>{status.error}</small>}<small>{status.environment === "Demo" ? "Demo mode: no real money moves. Production requires Gusto approval." : "Gusto handles bank debits, employee direct deposits, payroll taxes, and paystubs."}</small></article>;
+}
+
 function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (message: string) => void }) {
   const [tab, setTab] = useState("Run Payroll");
   const [query, setQuery] = useState("");
@@ -1173,9 +1231,8 @@ function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (mess
       } catch (error) { flash(error instanceof Error ? error.message : "Payroll payments could not be undone."); }
       return;
     }
-    if (!window.confirm(`Approve and mark ${rows.length} employee${rows.length === 1 ? "" : "s"} as paid?`)) return;
-    setPaidIds((current) => [...new Set([...current, ...employeeIds])]);
-    flash("Payroll approved. Payments are being recorded.");
+    if (!window.confirm(`Open Gusto to review taxes, deductions, bank debits, and direct deposits for ${rows.length} employee${rows.length === 1 ? "" : "s"}? Nothing is submitted until you confirm it in Gusto.`)) return;
+    await openGustoFlow("run_payroll", flash);
   }
   useEffect(() => {
     const newlyPaid = paidIds.filter((id) => !persistedPaidIds.current.has(id));
@@ -1223,15 +1280,14 @@ function PayrollPage({ employees, flash }: { employees: Employee[]; flash: (mess
     {payHistory}
     {tab !== "Pay History" && <>
     <div className="payroll-kpis">
-      <article className="panel payroll-kpi"><span className="payroll-icon purple">▣</span><small>Current Payroll Period</small><strong>{currentPayPeriod}</strong><em>{paySchedule.frequency} payroll</em><button className="primary-button" type="button" onClick={() => flash("Payroll run started.")}>Run Payroll</button></article>
+      <article className="panel payroll-kpi"><span className="payroll-icon purple">▣</span><small>Current Payroll Period</small><strong>{currentPayPeriod}</strong><em>{paySchedule.frequency} payroll</em><button className="primary-button" type="button" onClick={() => void openGustoFlow("run_payroll", flash)}>Run in Gusto</button></article>
       <article className="panel payroll-kpi"><span className="payroll-icon green">$</span><small>Pay Period</small><strong>{currentPayPeriod}</strong><em>{payrollPeriod.days} days</em><button className="text-button" type="button" onClick={() => flash("Pay period details opened.")}>View pay period details →</button></article>
       <article className="panel payroll-kpi"><span className="payroll-icon blue">♙</span><small>Employees Paid</small><strong>{paidRows.length} / {rows.length}</strong><em>Marked paid this period</em><button className="text-button" type="button" onClick={() => flash("Employee payroll list opened.")}>View all employees →</button></article>
       <article className="panel payroll-kpi"><span className="payroll-icon orange">▣</span><small>Est. Payroll Cost</small><strong>{money(estimatedCost)}</strong><em>Based on recorded hours</em><button className="text-button" type="button" onClick={() => flash("Cost breakdown opened.")}>View cost breakdown →</button></article>
     </div>
-    <PlaidConnectCard flash={flash} />
-    <PlaidTransferPanel rows={rows} periodStart={payrollPeriod.start} periodEnd={payrollPeriod.end} flash={flash} />
+    <GustoPayrollPanel flash={flash} />
     <div className="payroll-layout">
-      <article className="panel payroll-employees"><div className="payroll-section-head"><div><h2>Employees in This Payroll ({rows.length})</h2></div><div className="payroll-head-actions"><button className="secondary-button" type="button" onClick={() => flash("Payroll editor opened.")}>✎ Edit payroll</button><button className="primary-button" type="button" onClick={toggleAllPaid}>{allRowsPaid ? "Undo paid" : "＋ Approve & Pay"}</button></div></div><div className="payroll-filter-row"><label className="documents-search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search employees..." /></label><select defaultValue="All Departments"><option>All Departments</option><option>Operations</option><option>Front of House</option></select><select defaultValue="All Employment Types"><option>All Employment Types</option><option>Hourly</option><option>Salaried</option></select><button className="secondary-button" type="button" onClick={() => flash("Payroll filters opened.")}>☷ Filters</button></div><div className="payroll-table payroll-table-head"><span>Employee</span><span>Pay Rate</span><span>Regular Hours</span><span>Overtime Hours</span><span>Total Hours</span><span>Est. Pay</span><span>Status</span></div>{rows.map((row) => { const paid = paidIds.includes(row.employee.id); return <div className="payroll-table" key={row.employee.id}><div className="payroll-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><span>{formatHours(row.regularMinutes)}</span><span>{formatHours(row.overtimeMinutes)}</span><span>{formatHours(row.totalMinutes)}</span><strong>{money(row.estimatedCents)}</strong><button className={`payroll-status ${paid ? "paid" : ""}`} type="button" onClick={() => setPaid(row.employee.id, row.employee.name)}>{paid ? "Paid" : "Mark paid"}</button></div>; })}{!rows.length && <EmptyState title="No payroll employees" message="Employees and recorded hours will appear here." />}<div className="payroll-table-footer">Showing {rows.length} employees <span>‹　<b>1</b>　›</span></div></article>
+      <article className="panel payroll-employees"><div className="payroll-section-head"><div><h2>Employees in This Payroll ({rows.length})</h2></div><div className="payroll-head-actions"><button className="secondary-button" type="button" onClick={() => flash("Payroll editor opened.")}>✎ Edit payroll</button><button className="primary-button" type="button" onClick={toggleAllPaid}>{allRowsPaid ? "Undo manually paid" : "Open Gusto payroll"}</button></div></div><div className="payroll-filter-row"><label className="documents-search">⌕<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search employees..." /></label><select defaultValue="All Departments"><option>All Departments</option><option>Operations</option><option>Front of House</option></select><select defaultValue="All Employment Types"><option>All Employment Types</option><option>Hourly</option><option>Salaried</option></select><button className="secondary-button" type="button" onClick={() => flash("Payroll filters opened.")}>☷ Filters</button></div><div className="payroll-table payroll-table-head"><span>Employee</span><span>Pay Rate</span><span>Regular Hours</span><span>Overtime Hours</span><span>Total Hours</span><span>Est. Pay</span><span>Status</span></div>{rows.map((row) => { const paid = paidIds.includes(row.employee.id); return <div className="payroll-table" key={row.employee.id}><div className="payroll-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><span>{formatHours(row.regularMinutes)}</span><span>{formatHours(row.overtimeMinutes)}</span><span>{formatHours(row.totalMinutes)}</span><strong>{money(row.estimatedCents)}</strong><button className={`payroll-status ${paid ? "paid" : ""}`} type="button" onClick={() => setPaid(row.employee.id, row.employee.name)}>{paid ? "Paid manually" : "Mark paid manually"}</button></div>; })}{!rows.length && <EmptyState title="No payroll employees" message="Employees and recorded hours will appear here." />}<div className="payroll-table-footer">Showing {rows.length} employees <span>‹　<b>1</b>　›</span></div></article>
       <aside className="payroll-side"><article className="panel payroll-summary-card"><div className="panel-head"><div><h2>Payroll Summary</h2></div><button className="text-button" type="button" onClick={() => flash("Payroll breakdown opened.")}>View full breakdown →</button></div><dl><div><dt>Total Regular Hours</dt><dd>{formatHours(totalRegular)}</dd></div><div><dt>Total Overtime Hours</dt><dd>{formatHours(totalOvertime)}</dd></div><div><dt>Gross Payroll</dt><dd>{money(estimatedCost)}</dd></div><div><dt>Employee Taxes (Est.)</dt><dd>—</dd></div><div><dt>Employer Taxes (Est.)</dt><dd>—</dd></div><div className="payroll-total"><dt>Total Payroll Cost</dt><dd>{money(estimatedCost)}</dd></div></dl><div className="payroll-donut" /><div className="payroll-key"><span><i className="purple" />Gross wages <b>{money(estimatedCost)}</b></span><span><i className="blue" />Employee taxes <b>—</b></span><span><i className="green" />Employer taxes <b>—</b></span></div></article><article className="panel upcoming-payroll"><div className="panel-head"><h2>Upcoming Payroll</h2></div>{upcomingPayrolls.map((period, index) => <button type="button" key={period.label} onClick={() => flash(period.label + " opened.")}><span>$</span><div><strong>{period.label} <em>{paySchedule.frequency}</em></strong><small>Pay Date: {period.payDate}</small></div><b>{index === 0 ? money(estimatedCost) : "$0.00"} &gt;</b></button>)}<button className="text-button" type="button" onClick={() => flash("All payrolls opened.")}>View all payrolls →</button></article><article className="panel payroll-shortcuts"><h2>Payroll Shortcuts</h2><div>{["Add Bonus", "Reimburse Employee", "Manage Deductions", "Payroll Settings"].map((item) => <button type="button" key={item} onClick={() => flash(`${item} opened.`)}><span>✦</span>{item}</button>)}</div></article></aside>
     </div>
     </>}
@@ -1398,6 +1454,7 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
   const [publishedSnapshot, setPublishedSnapshot] = useState<ScheduleDraft | null>(null);
   const [lastDraftSavedAt, setLastDraftSavedAt] = useState<number | null>(null);
   const [publishing, setPublishing] = useState(false);
+  const [workedEntries, setWorkedEntries] = useState<Array<{ id: number; employeeId: number; employeeName: string; clockIn: number; clockOut: number | null }>>([]);
   const [scheduleSearch, setScheduleSearch] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const [editor, setEditor] = useState<ShiftEditorState | null>(null);
@@ -1417,6 +1474,16 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
   const activeDate = dateKey(days[0] ?? start);
   const activeWeekStart = view === "week" ? start : weekStartForDate(new Date());
   const dayKeys = useMemo(() => new Set(days.map((date) => dateKey(date))), [days]);
+  useEffect(() => {
+    if (demo) { setWorkedEntries([]); return; }
+    fetch(`/api/schedule/worked?start=${start.getTime()}&end=${end.getTime()}`, { cache: "no-store" })
+      .then(async (response) => {
+        const payload = await response.json() as { entries?: Array<{ id: number; employeeId: number; employeeName: string; clockIn: number; clockOut: number | null }> };
+        if (!response.ok) throw new Error("Worked shifts could not be loaded.");
+        setWorkedEntries(payload.entries ?? []);
+      })
+      .catch(() => setWorkedEntries([]));
+  }, [start.getTime(), end.getTime(), demo]);
   const shiftsByDate = useMemo(() => {
     const grouped = new Map<string, ScheduledShift[]>();
     for (const shift of draft.shifts) {
@@ -1431,6 +1498,27 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
     return grouped;
   }, [dayKeys, draft.shifts]);
   const shiftsInView = draft.shifts.filter((shift) => dayKeys.has(shift.date));
+  const unscheduledWorkedEntries = useMemo(() => workedEntries.map((entry) => {
+    const clockIn = new Date(entry.clockIn);
+    const clockOut = new Date(entry.clockOut ?? Date.now());
+    const date = dateKey(clockIn);
+    const startMinutes = clockIn.getHours() * 60 + clockIn.getMinutes();
+    const endMinutes = dateKey(clockOut) === date ? clockOut.getHours() * 60 + clockOut.getMinutes() : 24 * 60;
+    return { ...entry, date, startMinutes, endMinutes: Math.max(startMinutes + 1, endMinutes), active: entry.clockOut == null };
+  }).filter((entry) => dayKeys.has(entry.date) && !draft.shifts.some((shift) =>
+    shift.employeeId === entry.employeeId &&
+    shift.date === entry.date &&
+    entry.endMinutes > shift.startMinutes &&
+    entry.startMinutes < shift.endMinutes
+  )), [workedEntries, draft.shifts, dayKeys]);
+  const unscheduledWorkedByEmployeeDate = useMemo(() => {
+    const grouped = new Map<string, typeof unscheduledWorkedEntries>();
+    for (const entry of unscheduledWorkedEntries) {
+      const key = `${entry.employeeId}:${entry.date}`;
+      grouped.set(key, [...(grouped.get(key) ?? []), entry]);
+    }
+    return grouped;
+  }, [unscheduledWorkedEntries]);
   const totalScheduledMinutes = shiftsInView.reduce((sum, shift) => sum + shiftMinutes(shift), 0);
   // Keep a stable, high-contrast color per employee in the planner. This is
   // intentionally separate from the employee's profile color so a roster with
@@ -1448,12 +1536,14 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
   const scheduleEmployees = useMemo(() => [ownerEmployee, ...employees], [ownerName, employees]);
   const employeeRows = useMemo(() => scheduleEmployees.map((employee) => {
     const employeeShifts = shiftsInView.filter((shift) => shift.employeeId === employee.id);
+    const workedMinutes = unscheduledWorkedEntries.filter((entry) => entry.employeeId === employee.id)
+      .reduce((sum, entry) => sum + Math.max(0, entry.endMinutes - entry.startMinutes), 0);
     return {
       employee,
       shifts: employeeShifts,
-      minutes: employeeShifts.reduce((sum, shift) => sum + shiftMinutes(shift), 0),
+      minutes: employeeShifts.reduce((sum, shift) => sum + shiftMinutes(shift), 0) + workedMinutes,
     };
-  }), [scheduleEmployees, shiftsInView]);
+  }), [scheduleEmployees, shiftsInView, unscheduledWorkedEntries]);
   const selectedShift = selectedShiftId == null ? null : draft.shifts.find((shift) => shift.id === selectedShiftId) ?? null;
   const scheduleVersion = JSON.stringify({ shifts: draft.shifts, templates: draft.templates });
   const publishedVersion = publishedSnapshot ? JSON.stringify({ shifts: publishedSnapshot.shifts, templates: publishedSnapshot.templates }) : null;
@@ -1775,6 +1865,14 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
     </article>;
   }
 
+  function renderWorkedCard(entry: (typeof unscheduledWorkedEntries)[number]) {
+    const minutes = Math.max(0, entry.endMinutes - entry.startMinutes);
+    return <article className="schedule-worked-card" key={`worked-${entry.id}`}>
+      <div><strong>{minutesToDisplayTime(entry.startMinutes)} - {entry.active ? "Now" : minutesToDisplayTime(entry.endMinutes)}</strong><span>Worked, unscheduled</span></div>
+      <small>{entry.active ? "CLOCKED IN" : formatHours(minutes)}</small>
+    </article>;
+  }
+
   const scheduleLabel = formatScheduleLabel(view, start, end, offset);
   const coverageRows = days.map((date) => {
     const dayShifts = shiftsByDate.get(dateKey(date)) ?? [];
@@ -1828,6 +1926,7 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
             const dayShifts = shiftsByDate.get(dateString) ?? [];
             const minutes = dayShifts.reduce((sum, shift) => sum + shiftMinutes(shift), 0);
             const dayPayments = payments.filter((payment) => dateKey(new Date(payment.paidAt)) === dateString);
+            const dayWorked = unscheduledWorkedEntries.filter((entry) => entry.date === dateString);
             const employeeGroups = employees.map((employee) => ({
               employee,
               shifts: dayShifts.filter((shift) => shift.employeeId === employee.id),
@@ -1846,6 +1945,7 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
             >
               <div className="month-day-head"><strong>{date.getDate()}</strong><span>{minutes ? formatHours(minutes) : ""}</span></div>
               {dayPayments.map((payment) => <span className="month-payment-chip" key={payment.id}>Paid {moneyValue(payment.amountCents)}</span>)}
+              {dayWorked.map((entry) => <span className="month-worked-chip" key={`worked-${entry.id}`}><b>{entry.employeeName}</b> · Worked {minutesToDisplayTime(entry.startMinutes)}-{entry.active ? "Now" : minutesToDisplayTime(entry.endMinutes)}</span>)}
               <div className="month-shift-list">
                 {employeeGroups.map(({ employee, shifts: employeeDayShifts }) => <div className="month-employee-group" key={employee.id}>
                   <div className="month-employee-name"><span className={`avatar ${scheduleColor(employee.id, employee.color)}`}>{employee.initials}</span><strong>{employee.name}</strong></div>
@@ -1932,6 +2032,7 @@ function Schedule({ employees, ownerName, flash, openNewShiftTick, demo = false 
           >
             {availabilityState === "unavailable" && <span className="schedule-availability-blocked">Unavailable</span>}
             {dayShifts.map(renderShiftCard)}
+            {(unscheduledWorkedByEmployeeDate.get(`${employee.id}:${dateString}`) ?? []).map(renderWorkedCard)}
             <button type="button" className="schedule-cell-add" onClick={() => addNewShiftForDate(dateString)}>＋</button>
           </div>;
         })}
@@ -2076,6 +2177,11 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
   const [detailLoading, setDetailLoading] = useState(false);
   const [showAddTime, setShowAddTime] = useState(false);
   const [showPayment, setShowPayment] = useState(false);
+
+  useEffect(() => {
+    const employeeId = Number(new URLSearchParams(window.location.search).get("employee"));
+    if (Number.isInteger(employeeId) && employeeId > 0) void loadDetail(employeeId);
+  }, []);
 
   async function loadDetail(id: number) {
     setSelectedId(id);
@@ -2383,10 +2489,12 @@ type AiMessage = {
   content: string;
 };
 
-type WorkspaceMessage = { id: number; conversationId?: string; senderType: "owner" | "employee"; senderId: number; senderName: string; body: string; createdAt: number };
+type WorkspaceMessage = { id: number; conversationId?: string; senderType: "owner" | "employee"; senderId: number; senderName: string; body: string; imageData?: string | null; imageName?: string | null; createdAt: number; sentByViewer?: boolean; replyTo?: { id: number; senderName: string; body: string } | null; reactions?: Array<{ emoji: string; count: number; reactedByViewer: boolean }>; readBy?: Array<{ readerType: string; readerId: number; readerName: string; readAt: number }> };
 
-function messagePreview(message: WorkspaceMessage, viewerAccess: Viewer["access"]) {
-  return `${message.senderType === viewerAccess ? "You" : message.senderName}: ${message.body}`;
+const MESSAGE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"] as const;
+
+function messagePreview(message: WorkspaceMessage, _viewerAccess: Viewer["access"]) {
+  return `${message.sentByViewer ? "You" : message.senderName}: ${message.body || (message.imageData ? "Photo" : "Message")}`;
 }
 
 function messageSentTime(timestamp?: number) {
@@ -2410,6 +2518,8 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const [enabled, setEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [body, setBody] = useState("");
+  const [imageData, setImageData] = useState<string | null>(null);
+  const [imageName, setImageName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ownerPhoto, setOwnerPhoto] = useState<string | null>(null);
@@ -2417,8 +2527,16 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const gestureRef = useRef<{ id: string; startX: number; distance: number } | null>(null);
   const ignoreClickRef = useRef(false);
   const [swipingId, setSwipingId] = useState<string | null>(null);
+  const [reactionMessageId, setReactionMessageId] = useState<number | null>(null);
+  const [replyingTo, setReplyingTo] = useState<WorkspaceMessage | null>(null);
+  const [onlinePeople, setOnlinePeople] = useState<Array<{ userType: "owner" | "employee"; userId: number; userName: string; lastSeen: number }>>([]);
+  const reactionHoldRef = useRef<{ timer: number; x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const photoInputRef = useRef<HTMLInputElement>(null);
   const activeConversationRef = useRef(activeConversation);
+  const hydratedConversationsRef = useRef(new Set<string>());
+  const messageLoadsInFlightRef = useRef(new Set<string>());
   activeConversationRef.current = activeConversation;
   function archiveConversation(conversationId: string) {
     setConversations((current) => current.map((conversation) => conversation.id === conversationId ? { ...conversation, archived: true } : conversation));
@@ -2471,45 +2589,92 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   };
   useEffect(() => {
     try {
-      const saved = JSON.parse(window.localStorage.getItem("coreshift-conversations") ?? "[]") as typeof conversations;
+      const saved = JSON.parse(window.localStorage.getItem(`coreshift-conversations:${viewer.businessId}:${viewer.actorId}`) ?? "[]") as typeof conversations;
       if (Array.isArray(saved)) setConversations((current) => [...current, ...saved.filter((item) => item?.id && item.id !== "managers" && !current.some((existing) => existing.id === item.id))].sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name)));
     } catch { /* keep the default conversation */ }
   }, []);
-  useEffect(() => { try { window.localStorage.setItem("coreshift-conversations", JSON.stringify(conversations)); } catch { /* storage may be unavailable */ } }, [conversations]);
+  useEffect(() => { try { window.localStorage.setItem(`coreshift-conversations:${viewer.businessId}:${viewer.actorId}`, JSON.stringify(conversations)); } catch { /* storage may be unavailable */ } }, [conversations]);
   // Restore previews from the local cache without making one network request
   // per conversation. The active thread is refreshed in the background below.
   useEffect(() => {
     setConversations((current) => current.map((conversation) => {
       try {
-        const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${conversation.id}`) ?? "null") as WorkspaceMessage[] | null;
+        const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversation.id}`) ?? "null") as WorkspaceMessage[] | null;
         const latest = cached?.at(-1);
         return latest ? { ...conversation, preview: messagePreview(latest, viewer.access), lastMessageAt: latest.createdAt } : conversation;
       } catch { return conversation; }
     }));
   }, []);
+  async function loadRecentConversations() {
+    const response = await fetch("/api/messages?list=1", { cache: "no-store" }).catch(() => null);
+    const result = response ? await response.json().catch(() => null) as { recentConversations?: Array<{ id: string; senderType: "owner" | "employee"; senderId: number; senderName: string; body: string; lastMessageAt: number; unread: number | boolean; sentByViewer: boolean }>; onlinePeople?: Array<{ userType: "owner" | "employee"; userId: number; userName: string; lastSeen: number }> } | null : null;
+    if (!response?.ok || !result?.recentConversations) return;
+    setOnlinePeople(result.onlinePeople ?? []);
+    setConversations((current) => {
+      const merged = [...current];
+      for (const recent of result.recentConversations ?? []) {
+        const existingIndex = merged.findIndex((conversation) => conversation.id === recent.id);
+        const kind = recent.id.startsWith("group-") ? "group" as const : "direct" as const;
+        const employeeId = Number(recent.id.replace("direct-", ""));
+        const employee = employees.find((person) => person.id === employeeId);
+        const fallbackName = kind === "group" ? "Group conversation" : viewer.access === "employee" ? "Owner" : employee?.name ?? recent.senderName;
+        const update = { id: recent.id, name: fallbackName, kind, memberCount: kind === "group" ? 3 : 2, unread: Boolean(recent.unread), preview: `${recent.sentByViewer ? "You" : recent.senderName}: ${recent.body}`, lastMessageAt: recent.lastMessageAt };
+        if (existingIndex >= 0) merged[existingIndex] = { ...update, ...merged[existingIndex], preview: update.preview, lastMessageAt: update.lastMessageAt, unread: update.unread };
+        else merged.push(update);
+      }
+      return merged.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || a.name.localeCompare(b.name));
+    });
+  }
   async function loadMessages() {
     const conversationId = activeConversationRef.current;
     if (!conversationId) { setMessages([]); setLoading(false); return; }
-    try {
-      const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${conversationId}`) ?? "null") as WorkspaceMessage[] | null;
-      if (Array.isArray(cached)) { setMessages(cached); setLoading(false); }
-    } catch { /* use the server copy */ }
-    const response = await fetch(`/api/messages?conversationId=${encodeURIComponent(conversationId)}`, { cache: "default" }).catch(() => null);
+    if (messageLoadsInFlightRef.current.has(conversationId)) return;
+    messageLoadsInFlightRef.current.add(conversationId);
+    if (!hydratedConversationsRef.current.has(conversationId)) {
+      hydratedConversationsRef.current.add(conversationId);
+      try {
+        const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`) ?? "null") as WorkspaceMessage[] | null;
+        if (Array.isArray(cached)) { setMessages(cached); setLoading(false); }
+      } catch { /* use the server copy */ }
+    }
+    const response = await fetch(`/api/messages?conversationId=${encodeURIComponent(conversationId)}&refresh=${Date.now()}`, { cache: "no-store" }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as { enabled?: boolean; messages?: WorkspaceMessage[] } | null : null;
-    if (!response?.ok) { setError("Messages could not be loaded."); return; }
+    if (!response?.ok) { messageLoadsInFlightRef.current.delete(conversationId); setError("Messages could not be loaded."); return; }
+    if (activeConversationRef.current !== conversationId) { messageLoadsInFlightRef.current.delete(conversationId); return; }
     setEnabled(result?.enabled !== false); setMessages(result?.messages ?? []); setLoading(false);
     const latest = result?.messages?.at(-1);
-    if (latest) setConversations((current) => current.map((conversation) => conversation.id === conversationId ? { ...conversation, preview: messagePreview(latest, viewer.access), lastMessageAt: latest.createdAt } : conversation));
-    try { window.localStorage.setItem(`coreshift-messages:${conversationId}`, JSON.stringify(result?.messages ?? [])); } catch { /* storage may be unavailable */ }
+    if (latest) {
+      setConversations((current) => current.map((conversation) => conversation.id === conversationId ? { ...conversation, preview: messagePreview(latest, viewer.access), lastMessageAt: latest.createdAt, unread: false } : conversation));
+      fetch("/api/messages", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId, throughMessageId: latest.id }) }).catch(() => undefined);
+    }
+    try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`, JSON.stringify(result?.messages ?? [])); } catch { /* storage may be unavailable */ }
+    messageLoadsInFlightRef.current.delete(conversationId);
   }
   function prefetchConversation(conversationId: string) {
-    if (typeof window === "undefined" || window.localStorage.getItem(`coreshift-messages:${conversationId}`)) return;
+    if (typeof window === "undefined" || window.localStorage.getItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`)) return;
     fetch(`/api/messages?conversationId=${encodeURIComponent(conversationId)}`, { cache: "default" })
       .then((response) => response.ok ? response.json() as Promise<{ messages?: WorkspaceMessage[] }> : null)
-      .then((result) => { if (result?.messages) window.localStorage.setItem(`coreshift-messages:${conversationId}`, JSON.stringify(result.messages)); })
+      .then((result) => { if (result?.messages) window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`, JSON.stringify(result.messages)); })
       .catch(() => undefined);
   }
-  useEffect(() => { loadMessages(); const timer = window.setInterval(loadMessages, 3000); return () => window.clearInterval(timer); }, []);
+  useEffect(() => {
+    const refreshVisibleMessages = () => { if (document.visibilityState === "visible") loadMessages(); };
+    loadMessages();
+    const timer = window.setInterval(refreshVisibleMessages, 1500);
+    window.addEventListener("focus", refreshVisibleMessages);
+    document.addEventListener("visibilitychange", refreshVisibleMessages);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refreshVisibleMessages); document.removeEventListener("visibilitychange", refreshVisibleMessages); };
+  }, []);
+  useEffect(() => { loadRecentConversations(); const timer = window.setInterval(loadRecentConversations, 3000); return () => window.clearInterval(timer); }, []);
+  useEffect(() => {
+    const heartbeat = () => fetch("/api/messages", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "presence" }) }).catch(() => undefined);
+    const refreshWhenVisible = () => { if (document.visibilityState === "visible") heartbeat(); };
+    heartbeat();
+    const timer = window.setInterval(heartbeat, 20_000);
+    window.addEventListener("focus", heartbeat);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", heartbeat); document.removeEventListener("visibilitychange", refreshWhenVisible); };
+  }, []);
   useEffect(() => {
     const start = () => conversations.forEach((conversation) => prefetchConversation(conversation.id));
     const requestIdle = (window as Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
@@ -2520,6 +2685,9 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   useEffect(() => { const openComposer = () => { setComposeMode("direct"); setComposeOpen(true); }; window.addEventListener("coreshift:new-message", openComposer); return () => window.removeEventListener("coreshift:new-message", openComposer); }, []);
   useEffect(() => {
     setMessages([]);
+    setReplyingTo(null);
+    setImageData(null);
+    setImageName("");
     loadMessages();
   }, [activeConversation]);
   useEffect(() => {
@@ -2529,12 +2697,68 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     tabs.forEach((tab) => { const label = tab.textContent?.toLowerCase() ?? "all"; const selected = conversationFilter === "direct" ? label.startsWith("direct") : conversationFilter === "groups" ? label.startsWith("group") : conversationFilter === "unread" ? label.startsWith("unread") : label.startsWith("all"); tab.classList.toggle("active", selected); });
     items.forEach((item, index) => { item.style.display = visibleConversations.some((conversation) => conversation.id === conversations[index]?.id) ? "grid" : "none"; });
   }, [conversationFilter, conversations]);
+  async function chooseMessagePhoto(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]; event.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/") || file.size > 10 * 1024 * 1024) { setError("Choose a photo smaller than 10 MB."); return; }
+    setError("");
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => { const item = new Image(); item.onload = () => resolve(item); item.onerror = reject; item.src = objectUrl; });
+      const limit = 1280; const scale = Math.min(1, limit / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement("canvas"); canvas.width = Math.max(1, Math.round(image.naturalWidth * scale)); canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
+      setImageData(canvas.toDataURL("image/jpeg", 0.82)); setImageName(file.name.slice(0, 120)); composerRef.current?.focus();
+    } catch { setError("That photo could not be prepared. Try another image."); }
+    finally { URL.revokeObjectURL(objectUrl); }
+  }
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if (!body.trim() || busy) return; setBusy(true); setError("");
-    const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, conversationId: activeConversation }) }).catch(() => null);
+    event.preventDefault(); if ((!body.trim() && !imageData) || busy) return; setBusy(true); setError("");
+    const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, imageData, imageName, conversationId: activeConversation, replyToId: replyingTo?.id }) }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as WorkspaceMessage & { error?: string } | null : null;
     setBusy(false); if (!response?.ok) { setError(result?.error ?? "Message could not be sent."); return; }
-    if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); } setBody("");
+    if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); } setBody(""); setImageData(null); setImageName(""); setReplyingTo(null);
+  }
+  function beginReactionHold(event: React.PointerEvent<HTMLDivElement>, messageId: number) {
+    if (event.pointerType === "mouse" && event.button !== 0) return;
+    if (reactionHoldRef.current) window.clearTimeout(reactionHoldRef.current.timer);
+    const timer = window.setTimeout(() => { setReactionMessageId(messageId); reactionHoldRef.current = null; }, 480);
+    reactionHoldRef.current = { timer, x: event.clientX, y: event.clientY };
+  }
+  function moveReactionHold(event: React.PointerEvent<HTMLDivElement>) {
+    const hold = reactionHoldRef.current;
+    if (!hold || Math.hypot(event.clientX - hold.x, event.clientY - hold.y) < 10) return;
+    window.clearTimeout(hold.timer);
+    reactionHoldRef.current = null;
+  }
+  function endReactionHold() {
+    if (!reactionHoldRef.current) return;
+    window.clearTimeout(reactionHoldRef.current.timer);
+    reactionHoldRef.current = null;
+  }
+  function startReply(message: WorkspaceMessage) {
+    setReactionMessageId(null);
+    setReplyingTo(message);
+    window.setTimeout(() => composerRef.current?.focus(), 0);
+  }
+  async function toggleReaction(messageId: number, emoji: string) {
+    setReactionMessageId(null);
+    const response = await fetch("/api/messages", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ messageId, emoji }) }).catch(() => null);
+    const result = response ? await response.json().catch(() => null) as { active?: boolean; count?: number; error?: string } | null : null;
+    if (!response?.ok || typeof result?.active !== "boolean") { setError(result?.error ?? "Reaction could not be saved."); return; }
+    setMessages((current) => {
+      const next = current.map((message) => {
+        if (message.id !== messageId) return message;
+        const reactions = [...(message.reactions ?? [])];
+        const index = reactions.findIndex((reaction) => reaction.emoji === emoji);
+        if (Number(result.count) < 1) { if (index >= 0) reactions.splice(index, 1); }
+        else if (index >= 0) reactions[index] = { ...reactions[index], count: Number(result.count), reactedByViewer: result.active };
+        else reactions.push({ emoji, count: Number(result.count), reactedByViewer: result.active });
+        return { ...message, reactions };
+      });
+      try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ }
+      return next;
+    });
   }
   const visibleConversations = conversations.filter((conversation) => Boolean(conversation.archived) === showArchived && (conversationFilter === "all" || (conversationFilter === "direct" && conversation.kind === "direct") || (conversationFilter === "groups" && conversation.memberCount >= 3) || (conversationFilter === "unread" && conversation.unread)));
   const active = conversations.find((conversation) => conversation.id === activeConversation && Boolean(conversation.archived) === showArchived) ?? visibleConversations[0];
@@ -2548,8 +2772,31 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     const photo = viewer.access === "employee" ? ownerPhoto : employee?.profilePhoto ?? (employeeId && typeof window !== "undefined" ? window.localStorage.getItem(`coreshift-employee-photo:${employeeId}`) : null);
     return photo ? <img className="conversation-avatar-image" src={photo} alt="" /> : viewer.access === "employee" ? avatarFor(undefined, true) : nameInitials(employee?.displayName ?? employee?.name ?? conversation.name);
   };
+  const conversationPresence = (conversation?: typeof conversations[number]) => {
+    if (!conversation || conversation.kind !== "direct") return undefined;
+    if (viewer.access === "employee") return onlinePeople.find((person) => person.userType === "owner");
+    const employeeId = Number(conversation.id.replace("direct-", ""));
+    return onlinePeople.find((person) => person.userType === "employee" && person.userId === employeeId);
+  };
+  const isConversationOnline = (conversation?: typeof conversations[number]) => {
+    const presence = conversationPresence(conversation);
+    return Boolean(presence && Date.now() - presence.lastSeen < 45_000);
+  };
+  const conversationPresenceText = (conversation?: typeof conversations[number]) => {
+    const presence = conversationPresence(conversation);
+    if (!presence) return "Offline";
+    if (Date.now() - presence.lastSeen < 45_000) return "Online";
+    const lastSeen = new Date(presence.lastSeen);
+    const elapsed = Date.now() - presence.lastSeen;
+    if (elapsed < 60_000) return "Last seen just now";
+    if (elapsed < 3_600_000) return `Last seen ${Math.floor(elapsed / 60_000)}m ago`;
+    if (lastSeen.toDateString() === new Date().toDateString()) return `Last seen at ${lastSeen.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+    const yesterday = new Date(); yesterday.setDate(yesterday.getDate() - 1);
+    if (lastSeen.toDateString() === yesterday.toDateString()) return `Last seen yesterday at ${lastSeen.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+    return `Last seen ${lastSeen.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+  };
   const createConversation = (event: FormEvent) => { event.preventDefault(); const name = composeMode === "group" ? composeName.trim() : employees.find((employee) => employee.id === composeMembers[0])?.name; if (!name || (composeMode === "group" && composeMembers.length < 2)) return; const conversation = { id: composeMode === "direct" ? `direct-${composeMembers[0]}` : `group-${Date.now()}`, name, kind: composeMode, memberCount: composeMode === "group" ? composeMembers.length + 1 : 2, unread: false }; setConversations((current) => (current.some((item) => item.id === conversation.id) ? current : [...current, conversation]).sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name))); setActiveConversation(conversation.id); setMessages([]); setComposeOpen(false); setComposeName(""); setComposeMembers([]); };
-  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className="conversation-avatar">{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p></div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className="conversation-avatar large">{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small>{active?.kind === "group" ? `Group conversation · ${messages.length || employees.length} members` : active ? "Direct conversation" : "Swipe right on a conversation to archive it"}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message) => <div className={`message-bubble ${message.senderType === viewer.access ? "mine" : ""}`} key={message.id}><div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}<time>{new Date(message.createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time></div><p>{message.body}</p></div>)}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || !body.trim()}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
+  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className={`conversation-avatar ${isConversationOnline(conversation) ? "online" : ""}`}>{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p>{conversation.kind === "direct" && <small className="conversation-presence-label">{conversationPresenceText(conversation)}</small>}</div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className={`conversation-avatar large ${isConversationOnline(active) ? "online" : ""}`}>{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small>{active?.kind === "group" ? `Group conversation · ${messages.length || employees.length} members` : active ? conversationPresenceText(active) : "Swipe right on a conversation to archive it"}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message, index) => { const previousMessage = messages[index - 1]; const grouped = Boolean(previousMessage && previousMessage.senderType === message.senderType && previousMessage.senderId === message.senderId); const readNames = [...new Set((message.readBy ?? []).map((receipt) => receipt.readerName))]; return <div className={`message-bubble ${message.sentByViewer ? "mine" : ""} ${grouped ? "grouped" : ""}`} key={message.id} onPointerDown={(event) => beginReactionHold(event, message.id)} onPointerMove={moveReactionHold} onPointerUp={endReactionHold} onPointerCancel={endReactionHold} onPointerLeave={endReactionHold} onContextMenu={(event) => { event.preventDefault(); setReactionMessageId(message.id); }} title="Press and hold for message options">{!grouped && <div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}</div>}{message.replyTo && <div className="message-reply-quote"><strong>Replying to {message.replyTo.senderName}</strong><span>{message.replyTo.body}</span></div>}{message.imageData && <a className="message-photo-link" href={message.imageData} target="_blank" rel="noreferrer" onPointerDown={(event) => event.stopPropagation()}><img className="message-photo" src={message.imageData} alt={message.imageName || "Shared photo"} /></a>}{message.body && <p>{message.body}</p>}<time className="message-full-date">{new Date(message.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</time>{Boolean(message.reactions?.length) && <div className="message-reaction-row">{message.reactions?.map((reaction) => <button className={reaction.reactedByViewer ? "mine" : ""} type="button" key={reaction.emoji} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); toggleReaction(message.id, reaction.emoji); }} aria-label={`${reaction.emoji} reaction, ${reaction.count}`}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div>}{reactionMessageId === message.id && <div className="message-reaction-picker" role="menu" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="message-reply-action" type="button" role="menuitem" onClick={() => startReply(message)} aria-label="Reply to message">Reply</button>{MESSAGE_REACTIONS.map((emoji) => <button type="button" role="menuitem" key={emoji} onClick={() => toggleReaction(message.id, emoji)} aria-label={`React with ${emoji}`}>{emoji}</button>)}</div>}{message.sentByViewer && <span className={`message-read-receipt ${readNames.length ? "read" : ""}`}>{readNames.length ? `✓✓ Read by ${readNames.length > 2 ? `${readNames.length} people` : readNames.join(", ")}` : "✓ Sent"}</span>}</div>; })}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><div className="message-attachment-controls"><input ref={photoInputRef} className="message-photo-input" type="file" accept="image/*" onChange={chooseMessagePhoto} /><button className="message-photo-button" type="button" onClick={() => photoInputRef.current?.click()}>Photo</button></div>{replyingTo && <div className="message-composer-reply"><strong>Replying to {replyingTo.senderName}</strong><span>{replyingTo.body}</span><button type="button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply">x</button></div>}{imageData && <div className="message-photo-preview"><img src={imageData} alt={imageName || "Photo ready to send"} /><button type="button" onClick={() => { setImageData(null); setImageName(""); }} aria-label="Remove photo">x</button></div>}<textarea ref={composerRef} value={body} onChange={(event) => setBody(event.target.value)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || (!body.trim() && !imageData)}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
 }
 
 function AiAssistant({ viewer }: { viewer: Viewer }) {
@@ -2646,12 +2893,20 @@ function EmployeeHome({ employee, now, toggleClock }: { employee?: Employee; now
     ["Wed", weekMinutes[2] ?? 0], ["Thu", weekMinutes[3] ?? 0], ["Fri", weekMinutes[4] ?? 0], ["Sat", weekMinutes[5] ?? 0],
   ] as const;
   const completion = scheduledHours > 0 ? Math.min(100, Math.round(workedHours / scheduledHours * 100)) : 0;
+  const payPeriodMinutes = employee.currentPayPeriodMinutes ?? employee.weeklyMinutes;
+  const payFrequency = employee.payFrequency ?? "Weekly";
+  const payPeriodLabel = employee.currentPayPeriodStart != null && employee.currentPayPeriodEnd != null
+    ? formatDateRange(new Date(employee.currentPayPeriodStart), new Date(employee.currentPayPeriodEnd), true)
+    : "Current pay period";
+  const nextPayDay = employee.nextPayDate
+    ? new Date(employee.nextPayDate).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })
+    : "Not set";
   return <>
     <EmployeeClockAction employee={employee} now={now} toggleClock={toggleClock} />
     <section className="employee-dashboard-grid">
       <article className="panel employee-week-card"><PanelHead title="This Week" subtitle="Current week" /><div className="employee-week-metrics"><span>Hours Scheduled<strong>{scheduledHours.toFixed(2)}</strong></span><span>Hours Worked<strong>{workedHours.toFixed(2)}</strong></span><span>Overtime<strong>0.00</strong></span></div><div className="employee-completion"><div style={{background:`conic-gradient(#5732dd ${completion}%,#e6e9f2 0)`}}><b>{completion}%</b></div><span>Hours Completed<strong>{workedHours.toFixed(2)} / {scheduledHours.toFixed(2)}</strong><Link href="/my-hours">View Timesheet →</Link></span></div></article>
       <article className="panel employee-upcoming-card"><PanelHead title="Upcoming Shifts" /><div className="employee-upcoming-list"><div className="employee-upcoming-empty">No upcoming shifts scheduled.</div></div><Link className="text-button" href="/my-schedule">View full schedule →</Link></article>
-      <article className="panel employee-pay-card"><PanelHead title="Pay Overview" /><div><span>Next Pay Day<strong>Not set</strong><small>Payroll details will appear here.</small></span><span>Estimated Gross Pay<strong className="pay-green">{moneyValue(employee.currentPayPeriodEarningsCents ?? 0)}</strong><small>{formatHours(employee.weeklyMinutes)} regular hrs</small><Link href="/my-hours">View Pay Stubs →</Link></span></div></article>
+      <article className="panel employee-pay-card"><PanelHead title="Next Pay Stub" subtitle={`${payFrequency} payroll`} /><div><span>Next Pay Day<strong>{nextPayDay}</strong><small>{payPeriodLabel}</small></span><span>Estimated Gross Pay<strong className="pay-green">{moneyValue(employee.currentPayPeriodEarningsCents ?? 0)}</strong><small>{formatHours(payPeriodMinutes)} recorded in this {payFrequency.toLowerCase()} period</small><Link href="/my-hours">View Pay Stubs →</Link></span></div></article>
       <article className="panel employee-timesheet-card"><PanelHead title="My Timesheet" action={<Link className="text-button" href="/my-hours">View full timesheet →</Link>} /><strong>Current week · hours worked each day</strong><div className="employee-day-grid">{dailyWeek.map(([day, minutes]) => <div key={day} className={minutes ? "has-hours" : ""}><span>{day}</span><b>{minutes ? formatHours(minutes) : "–"}</b><small>hrs</small></div>)}</div><div className="employee-total-row"><span>Total Hours <b>{formatHours(employee.weeklyMinutes)}</b></span><span>Regular Hours <b>{formatHours(employee.weeklyMinutes)}</b></span><span>Overtime <b>0.00</b></span></div></article>
       <aside className="employee-right-stack"><article className="panel employee-clock-card"><PanelHead title="Time Clock" /><p>You're currently</p><h3>{working ? "Clocked In" : "Clocked Out"}</h3><small>{working ? `Working for ${formatHours(workedSinceClockIn)} · ${moneyValue(estimatedClockInPayCents)} estimated` : "Recorded times will appear here."}</small><Link className="text-button" href="/my-hours">♧　View time details</Link></article><article className="panel employee-simple-card"><PanelHead title="Requests" action={<Link className="text-button" href="/requests">View all (2) →</Link>} /><p>◷　Time Off Request <em>Pending</em></p><p>♧　Schedule Swap <em className="approved">Approved</em></p></article><article className="panel employee-simple-card"><PanelHead title="Announcements" action={<button className="text-button" type="button">View all →</button>} /><strong>Team Meeting</strong><p>We'll be having a quick team meeting to discuss new summer drinks and updates!</p></article></aside>
       <article className="panel employee-availability-card"><PanelHead title="Availability" action={<Link className="text-button" href="/profile">Edit Availability →</Link>} /><div className="employee-availability-grid">{["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map((day) => <div key={day}><span>{day}</span><small>Not set</small></div>)}</div></article>
@@ -2706,6 +2961,7 @@ function MySchedule({ employee }: { employee?: Employee }) {
   const [scheduleView, setScheduleView] = useState<ScheduleView>("week");
   const [weekOffset, setWeekOffset] = useState(0);
   const [publishedShifts, setPublishedShifts] = useState<PublishedShift[]>([]);
+  const [workedEntries, setWorkedEntries] = useState<Array<{ id: number; employeeId: number; employeeName: string; clockIn: number; clockOut: number | null }>>([]);
   const [loading, setLoading] = useState(true);
   const { payments, days } = usePaymentSchedule(scheduleView, weekOffset);
   useEffect(() => {
@@ -2717,6 +2973,14 @@ function MySchedule({ employee }: { employee?: Employee }) {
       .then(setPublishedShifts)
       .catch(() => setPublishedShifts([]))
       .finally(() => setLoading(false));
+  }, [days]);
+  useEffect(() => {
+    const rangeStart = days[0].getTime();
+    const rangeEnd = addDays(days[days.length - 1], 1).getTime() - 1;
+    fetch(`/api/schedule/worked?start=${rangeStart}&end=${rangeEnd}`, { cache: "no-store" })
+      .then((response) => response.ok ? response.json() as Promise<{ entries?: Array<{ id: number; employeeId: number; employeeName: string; clockIn: number; clockOut: number | null }> }> : Promise.reject())
+      .then((payload) => setWorkedEntries(payload.entries ?? []))
+      .catch(() => setWorkedEntries([]));
   }, [days]);
   if (!employee) return <EmployeeLoading />;
   return <>
@@ -2735,14 +2999,25 @@ function MySchedule({ employee }: { employee?: Employee }) {
         const dayKey = dateKey(date);
         const dayShifts = publishedShifts.filter((shift) => shift.date === dayKey);
         const dayPayments = payments.filter((payment) => dateKey(new Date(payment.paidAt)) === dateKey(date));
-        return <article className={`personal-shift ${dayShifts.length ? "scheduled-shift" : dayPayments.length ? "payment-day" : "off"}`} key={dayKey}>
+        const dayWorked = workedEntries.filter((entry) => entry.employeeId === employee.id && dateKey(new Date(entry.clockIn)) === dayKey).map((entry) => {
+          const clockIn = new Date(entry.clockIn);
+          const clockOut = new Date(entry.clockOut ?? Date.now());
+          const startMinutes = clockIn.getHours() * 60 + clockIn.getMinutes();
+          const endMinutes = dateKey(clockOut) === dayKey ? clockOut.getHours() * 60 + clockOut.getMinutes() : 24 * 60;
+          return { ...entry, startMinutes, endMinutes: Math.max(startMinutes + 1, endMinutes), active: entry.clockOut == null };
+        }).filter((entry) => !dayShifts.some((shift) => entry.endMinutes > shift.startMinutes && entry.startMinutes < shift.endMinutes));
+        const workedMinutes = dayWorked.reduce((sum, entry) => sum + entry.endMinutes - entry.startMinutes, 0);
+        return <article className={`personal-shift ${dayShifts.length ? "scheduled-shift" : dayWorked.length ? "worked-unscheduled" : dayPayments.length ? "payment-day" : "off"}`} key={dayKey}>
           <div className="shift-date"><span>{date.toLocaleDateString([], { weekday: "short" })}</span><strong>{date.getDate()}</strong></div>
           <div>{loading ? <><strong>Loading schedule…</strong><p>Checking published shifts</p></> : dayShifts.length
             ? <><strong>{dayShifts.map((shift) => `${minutesToDisplayTime(shift.startMinutes)} – ${minutesToDisplayTime(shift.endMinutes)}`).join(" · ")}</strong><p>{dayShifts.map((shift) => shift.note || shift.employeeName || shift.role || "Scheduled shift").join(" · ")}</p>{dayPayments.length > 0 && <span>Payment received: {dayPayments.map((payment) => moneyValue(payment.amountCents)).join(" · ")}</span>}</>
+            : dayWorked.length
+              ? <><strong>{dayWorked.map((entry) => `${minutesToDisplayTime(entry.startMinutes)} - ${entry.active ? "Now" : minutesToDisplayTime(entry.endMinutes)}`).join(" · ")}</strong><p>Worked, unscheduled</p><span>{dayWorked.some((entry) => entry.active) ? `Currently clocked in · ${formatHours(workedMinutes)} so far` : `${formatHours(workedMinutes)} recorded`}</span></>
             : dayPayments.length
               ? <><strong>Payment received</strong><p>{dayPayments.map((payment) => moneyValue(payment.amountCents)).join(" · ")}</p><span>{dayPayments.map((payment) => payment.note).filter(Boolean).join(" · ") || "Recorded by your owner"}</span></>
               : <><strong>No shift or payment entered</strong><p>0 hours scheduled</p></>}</div>
-          <i className="shift-state">{dayShifts.length ? formatHours(dayShifts.reduce((sum, shift) => sum + shiftMinutes(shift), 0)) : dayPayments.length ? "Paid" : "0h"}</i>
+          {dayShifts.length > 0 && dayWorked.length > 0 && <div className="employee-unscheduled-note"><strong>Worked, unscheduled</strong><span>{dayWorked.map((entry) => `${minutesToDisplayTime(entry.startMinutes)}-${entry.active ? "Now" : minutesToDisplayTime(entry.endMinutes)}`).join(" · ")}</span></div>}
+          <i className="shift-state">{dayWorked.length ? `Worked ${formatHours(workedMinutes)}` : dayShifts.length ? formatHours(dayShifts.reduce((sum, shift) => sum + shiftMinutes(shift), 0)) : dayPayments.length ? "Paid" : "0h"}</i>
         </article>;
       })}
     </section>
@@ -3083,14 +3358,93 @@ function PayOvertimeSettingsPage({ flash, onNavigate }: { flash: (message: strin
   return <div className="settings-reference"><aside className="settings-reference-nav"><div className="settings-ref-nav-list">{nav.map(([icon, title, target]) => <button type="button" className={target === "pay" ? "active" : ""} key={title} onClick={() => onNavigate(target)}><span>{icon}</span><div><strong>{title}</strong><small>{title === "Pay & Overtime" ? "Pay rates and overtime rules" : "Settings and preferences"}</small></div></button>)}</div><div className="settings-ref-promo"><strong>Pay your team with confidence</strong><p>Keep rates, pay periods, and overtime rules in one place.</p><button type="button" onClick={() => flash("Payroll help opened.")}>Learn more</button></div></aside><main className="settings-reference-main pay-settings-page"><header className="pay-settings-header"><div><h1>Pay &amp; Overtime</h1><p>Manage pay rates, overtime rules, and related settings for your team.</p></div><button className="secondary-button" type="button" onClick={() => flash("Pay settings export is ready.")}>⇩ Export Settings</button></header><div className="pay-settings-tabs"><button className="active" type="button">Company</button><button className="active" type="button">Pay &amp; Overtime</button><button type="button" onClick={() => onNavigate("billing")}>Payroll</button><button type="button" onClick={() => onNavigate("time")}>Time &amp; Attendance</button><button type="button" onClick={() => onNavigate("general")}>Integrations</button></div><section className="pay-settings-card"><h2>Pay Settings</h2><div className="pay-settings-grid"><label>Default Pay Period<select value={payPeriod} onChange={field("payPeriod", payPeriod, setPayPeriod)}><option>Weekly (Sunday - Saturday)</option><option>Biweekly (Sunday - Saturday)</option><option>Semi-monthly</option><option>Monthly</option></select></label><label>Rounding<select value={rounding} onChange={field("rounding", rounding, setRounding)}><option>Exact time</option><option>5 minutes (0.08)</option><option>15 minutes (0.25)</option><option>30 minutes (0.5)</option></select></label><label>Pay Day<select value={payDay} onChange={field("payDay", payDay, setPayDay)}>{["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"].map(day => <option key={day}>{day}</option>)}</select></label><Toggle label="Allow different rates by role / position" description="Enable custom pay rates for different roles." value={differentRates} onChange={field("differentRates", differentRates, setDifferentRates)} /><label>Pay Frequency<select value={frequency} onChange={field("frequency", frequency, setFrequency)}><option>Weekly</option><option>Biweekly</option><option>Semi-monthly</option><option>Monthly</option></select></label><Toggle label="Allow individual pay rate overrides" description="Managers can set custom rates per employee." value={individualRates} onChange={field("individualRates", individualRates, setIndividualRates)} /></div><div className="pay-rate-table"><h3>Pay Rates</h3><div className="pay-rate-head"><span>Role / Position</span><span>Type</span><span>Rate</span><span>Actions</span></div>{[["Barista","Hourly","$15.00 / hr"],["Shift Lead","Hourly","$16.50 / hr"],["Cashier","Hourly","$14.00 / hr"],["Manager","Salary","$52,000 / yr"]].map(([role, type, rate]) => <div className="pay-rate-row" key={role}><strong>{role}</strong><span>{type}</span><span>{rate}</span><span>✎　▢</span></div>)}<button type="button" className="pay-add-rate" onClick={() => flash("Add pay rate opened.")}>＋ Add Pay Rate</button></div></section><section className="pay-settings-card"><h2>Overtime Settings</h2><div className="pay-settings-grid"><label>Overtime Rule<select value={rule} onChange={field("rule", rule, setRule)}><option>Time and a half (1.5x)</option><option>Double time (2x)</option><option>Custom multiplier</option></select></label><label>Overtime Threshold<div className="pay-input-suffix"><input value={threshold} onChange={field("threshold", threshold, setThreshold)} /><span>hours / week</span></div></label><Toggle label="Daily Overtime" description="Enable daily overtime after a set number of hours." value={dailyOvertime} onChange={field("dailyOvertime", dailyOvertime, setDailyOvertime)} /><label>Daily Threshold<div className="pay-input-suffix"><input value={dailyThreshold} onChange={field("dailyThreshold", dailyThreshold, setDailyThreshold)} /><span>hours / day</span></div></label><Toggle label="Double Time" description="Enable double time after the daily overtime threshold." value={doubleTime} onChange={field("doubleTime", doubleTime, setDoubleTime)} /><div className="pay-note">ⓘ Double time will be applied after the daily overtime threshold.</div><fieldset><legend>Overtime Applies To</legend><label><input type="radio" name="overtime-applies" defaultChecked /> All employees</label><label><input type="radio" name="overtime-applies" /> Non-exempt employees only</label><label><input type="radio" name="overtime-applies" /> Custom</label></fieldset><div><Toggle label="Overtime Approval" description="Require approval for overtime hours." value={approval} onChange={field("approval", approval, setApproval)} /><select className="pay-approval-select" defaultValue="Manager approval required"><option>Manager approval required</option><option>Owner approval required</option><option>No approval required</option></select><label className="pay-check"><input type="checkbox" checked={notify} onChange={field("notify", notify, setNotify)} /> Notify when overtime is worked</label></div></div></section><div className="pay-info-banner"><div><strong>Need to make advanced payroll changes?</strong><p>Visit Payroll Settings to manage taxes, deductions, and other payroll preferences.</p></div><button type="button" onClick={() => onNavigate("billing")}>Go to Payroll Settings　→</button></div>{saved && <span className="pay-auto-save">Saved</span>}</main></div>;
 }
 
+type SettingsSection = "general" | "time" | "access" | "owners" | "notifications" | "billing" | "scheduling" | "pay" | "locations" | "integrations" | "security";
+type WorkspaceLocation = { id: string; name: string; address: string; timeZone: string; geofenceMeters: number; active: boolean; primary: boolean };
+type IntegrationState = { status: "not_connected" | "setup_requested"; syncEmployees: boolean; syncTime: boolean };
+type SecurityState = { loginAlerts: boolean; requireTwoFactor: boolean; rememberDevices: boolean; restrictUnknownDevices: boolean; sessionTimeoutMinutes: number };
+
+const settingsNavItems: [SettingsSection, string, string, string][] = [
+  ["general", "Organization", "Company profile and details", "OR"], ["billing", "Billing & Subscription", "Manage your plan and billing", "BI"],
+  ["locations", "Locations", "Manage your locations", "LO"], ["access", "Roles & Permissions", "Control access and permissions", "RO"],
+  ["time", "Time & Attendance", "Rules and time tracking", "TI"], ["scheduling", "Scheduling", "Scheduling preferences", "SC"],
+  ["pay", "Pay & Overtime", "Pay rates and overtime rules", "PA"], ["notifications", "Notifications", "Notification preferences", "NO"],
+  ["integrations", "Integrations", "Connected apps and services", "IN"], ["owners", "Account", "Your account settings", "AC"],
+  ["security", "Security", "Password and security", "SE"],
+];
+
+function SettingsSectionNav({ active, onNavigate }: { active: SettingsSection; onNavigate: (section: SettingsSection) => void }) {
+  return <aside className="settings-reference-nav"><div className="settings-ref-nav-list">{settingsNavItems.map(([key, title, description, icon]) => <button type="button" className={active === key ? "active" : ""} key={key} onClick={() => onNavigate(key)}><span>{icon}</span><div><strong>{title}</strong><small>{description}</small></div></button>)}</div><div className="settings-ref-promo"><strong>Workspace controls</strong><p>Keep company operations organized and secure.</p><button type="button" onClick={() => onNavigate("security")}>Review security</button></div></aside>;
+}
+
+async function saveWorkspaceSettings(update: Record<string, unknown>) {
+  const response = await fetch("/api/settings/workspace", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(update) });
+  const payload = await response.json().catch(() => null) as { settings?: Record<string, unknown>; error?: string } | null;
+  if (!response.ok || !payload?.settings) throw new Error(payload?.error || "Settings could not be saved.");
+  return payload.settings;
+}
+
+function LocationsSettingsPage({ flash, onNavigate }: { flash: (message: string) => void; onNavigate: (section: SettingsSection) => void }) {
+  const emptyDraft = { name: "", address: "", timeZone: "America/Chicago", geofenceMeters: "150" };
+  const [locations, setLocations] = useState<WorkspaceLocation[]>([]);
+  const [draft, setDraft] = useState(emptyDraft);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [showForm, setShowForm] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { fetch("/api/settings/workspace", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ settings: { locations: WorkspaceLocation[] } }> : Promise.reject()).then((payload) => setLocations(payload.settings.locations || [])).catch(() => flash("Locations could not be loaded.")).finally(() => setLoading(false)); }, []);
+  const persist = async (next: WorkspaceLocation[], message: string) => { const previous = locations; setLocations(next); setSaving(true); try { await saveWorkspaceSettings({ locations: next }); flash(message); } catch (error) { setLocations(previous); flash(error instanceof Error ? error.message : "Locations could not be saved."); } finally { setSaving(false); } };
+  const openEditor = (location?: WorkspaceLocation) => { if (location) { setEditingId(location.id); setDraft({ name: location.name, address: location.address, timeZone: location.timeZone, geofenceMeters: String(location.geofenceMeters) }); } else { setEditingId(null); setDraft(emptyDraft); } setShowForm(true); };
+  const submit = (event: React.FormEvent) => { event.preventDefault(); const name = draft.name.trim(); const address = draft.address.trim(); if (!name || !address) { flash("Enter a location name and address."); return; } const updated: WorkspaceLocation = { id: editingId || `location-${Date.now()}`, name, address, timeZone: draft.timeZone, geofenceMeters: Math.max(25, Number(draft.geofenceMeters) || 150), active: editingId ? locations.find((item) => item.id === editingId)?.active !== false : true, primary: editingId ? locations.find((item) => item.id === editingId)?.primary === true : locations.length === 0 }; const next = editingId ? locations.map((item) => item.id === editingId ? updated : item) : [...locations, updated]; setShowForm(false); void persist(next, editingId ? "Location updated." : "Location added."); };
+  return <div className="settings-reference settings-feature-page"><SettingsSectionNav active="locations" onNavigate={onNavigate} /><main className="settings-reference-main"><header className="settings-feature-head"><div><p className="eyebrow">WORKPLACES</p><h1>Locations</h1><p>Manage where employees work, clock in, and appear on schedules.</p></div><button className="primary-button" type="button" onClick={() => openEditor()}>+ Add location</button></header><section className="settings-feature-summary"><article><strong>{locations.length}</strong><span>Total locations</span></article><article><strong>{locations.filter((item) => item.active).length}</strong><span>Active</span></article><article><strong>{locations.find((item) => item.primary)?.name || "Not set"}</strong><span>Primary location</span></article></section><section className="settings-location-list">{loading && <div className="settings-feature-empty">Loading locations...</div>}{!loading && !locations.length && <div className="settings-feature-empty"><strong>No locations yet</strong><span>Add the first place where your team works.</span></div>}{locations.map((location) => <article className="settings-location-card" key={location.id}><span className="settings-location-pin">LO</span><div><h3>{location.name}{location.primary && <em>Primary</em>}{!location.active && <em className="inactive">Inactive</em>}</h3><p>{location.address}</p><small>{location.timeZone} | {location.geofenceMeters} m clock-in radius</small></div><div className="settings-location-actions"><button type="button" onClick={() => openEditor(location)}>Edit</button>{!location.primary && <button type="button" onClick={() => void persist(locations.map((item) => ({ ...item, primary: item.id === location.id })), `${location.name} is now the primary location.`)}>Make primary</button>}<button type="button" onClick={() => void persist(locations.map((item) => item.id === location.id ? { ...item, active: !item.active } : item), location.active ? "Location deactivated." : "Location activated.")}>{location.active ? "Deactivate" : "Activate"}</button>{!location.primary && <button className="danger-link" type="button" onClick={() => void persist(locations.filter((item) => item.id !== location.id), "Location removed.")}>Remove</button>}</div></article>)}</section>{saving && <span className="settings-save-state">Saving...</span>}</main>{showForm && <div className="modal-backdrop"><form className="modal-card settings-location-modal" onSubmit={submit}><div className="modal-head"><div><p className="eyebrow">LOCATION</p><h2>{editingId ? "Edit location" : "Add location"}</h2></div><button type="button" aria-label="Close" onClick={() => setShowForm(false)}>x</button></div><div className="modal-body settings-location-form"><label>Location name<input autoFocus value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="Downtown store" /></label><label>Street address<input value={draft.address} onChange={(event) => setDraft({ ...draft, address: event.target.value })} placeholder="123 Main Street, City, State" /></label><label>Time zone<select value={draft.timeZone} onChange={(event) => setDraft({ ...draft, timeZone: event.target.value })}><option value="America/Chicago">Central Time</option><option value="America/New_York">Eastern Time</option><option value="America/Denver">Mountain Time</option><option value="America/Los_Angeles">Pacific Time</option></select></label><label>Clock-in radius (meters)<input type="number" min="25" value={draft.geofenceMeters} onChange={(event) => setDraft({ ...draft, geofenceMeters: event.target.value })} /></label><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setShowForm(false)}>Cancel</button><button className="primary-button" type="submit">Save location</button></div></div></form></div>}</div>;
+}
+
+function IntegrationsSettingsPage({ flash, onNavigate }: { flash: (message: string) => void; onNavigate: (section: SettingsSection) => void }) {
+  const defaults: Record<string, IntegrationState> = { quickbooks: { status: "not_connected", syncEmployees: false, syncTime: false }, gusto: { status: "not_connected", syncEmployees: false, syncTime: false }, googleCalendar: { status: "not_connected", syncEmployees: false, syncTime: false }, slack: { status: "not_connected", syncEmployees: false, syncTime: false } };
+  const providers = [{ id: "quickbooks", badge: "QB", name: "QuickBooks Online", description: "Prepare approved hours for accounting and payroll." }, { id: "gusto", badge: "GU", name: "Gusto", description: "Prepare employee and time data for payroll." }, { id: "googleCalendar", badge: "GC", name: "Google Calendar", description: "Keep published schedules alongside calendar events." }, { id: "slack", badge: "SL", name: "Slack", description: "Plan schedule and attendance notifications for channels." }];
+  const [integrations, setIntegrations] = useState(defaults);
+  const [loading, setLoading] = useState(true);
+  const [savingId, setSavingId] = useState<string | null>(null);
+  useEffect(() => { fetch("/api/settings/workspace", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ settings: { integrations: Record<string, IntegrationState> } }> : Promise.reject()).then((payload) => setIntegrations({ ...defaults, ...(payload.settings.integrations || {}) })).catch(() => flash("Integrations could not be loaded.")).finally(() => setLoading(false)); }, []);
+  const update = async (id: string, next: IntegrationState, message: string) => { const previous = integrations; const updated = { ...integrations, [id]: next }; setIntegrations(updated); setSavingId(id); try { await saveWorkspaceSettings({ integrations: updated }); flash(message); } catch (error) { setIntegrations(previous); flash(error instanceof Error ? error.message : "Integration settings could not be saved."); } finally { setSavingId(null); } };
+  return <div className="settings-reference settings-feature-page"><SettingsSectionNav active="integrations" onNavigate={onNavigate} /><main className="settings-reference-main"><header className="settings-feature-head"><div><p className="eyebrow">CONNECTED TOOLS</p><h1>Integrations</h1><p>Prepare the services CoreShift can exchange data with. Provider authorization is completed separately.</p></div></header><div className="settings-integration-note"><strong>Connections stay honest</strong><span>Requesting setup does not mark a provider connected. OAuth credentials and provider approval are still required.</span></div><section className="settings-integration-grid">{providers.map((provider) => { const state = integrations[provider.id] || defaults[provider.id]; const requested = state.status === "setup_requested"; return <article className="settings-integration-card" key={provider.id}><div className="integration-card-head"><span>{provider.badge}</span><div><h3>{provider.name}</h3><em className={requested ? "requested" : ""}>{requested ? "Setup requested" : "Not connected"}</em></div></div><p>{provider.description}</p><label><input type="checkbox" checked={state.syncEmployees} disabled={!requested} onChange={(event) => void update(provider.id, { ...state, syncEmployees: event.target.checked }, "Employee sync preference saved.")} /> Prepare employee data</label><label><input type="checkbox" checked={state.syncTime} disabled={!requested} onChange={(event) => void update(provider.id, { ...state, syncTime: event.target.checked }, "Time sync preference saved.")} /> Prepare approved time</label><button className={requested ? "secondary-button" : "primary-button"} type="button" disabled={loading || savingId === provider.id} onClick={() => void update(provider.id, { ...state, status: requested ? "not_connected" : "setup_requested" }, requested ? "Integration setup request canceled." : "Integration setup request saved.")}>{savingId === provider.id ? "Saving..." : requested ? "Cancel request" : "Request setup"}</button></article>; })}</section></main></div>;
+}
+
+type LiveIntegrationStatus = { id: string; configured: boolean; missing: string[]; connected: boolean; accountName: string | null; accountId: string | null; connectedAt: number | null; callbackUrl: string };
+
+function LiveIntegrationsSettingsPage({ flash, onNavigate }: { flash: (message: string) => void; onNavigate: (section: SettingsSection) => void }) {
+  const providers = [{ id: "quickbooks", badge: "QB", name: "QuickBooks Online", description: "Authorize a QuickBooks company and verify accounting API access." }, { id: "gusto", badge: "GU", name: "Gusto", description: "Authorize an approved Gusto Embedded Payroll company." }, { id: "googleCalendar", badge: "GC", name: "Google Calendar", description: "Authorize Calendar event access for published schedules." }, { id: "slack", badge: "SL", name: "Slack", description: "Authorize a Slack workspace for schedule and attendance messages." }];
+  const [statuses, setStatuses] = useState<Record<string, LiveIntegrationStatus>>({});
+  const [loading, setLoading] = useState(true);
+  const [working, setWorking] = useState<string | null>(null);
+  const load = () => fetch("/api/integrations/status", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ providers: LiveIntegrationStatus[] }> : Promise.reject()).then((payload) => setStatuses(Object.fromEntries(payload.providers.map((item) => [item.id, item])))).catch(() => flash("Integration status could not be loaded.")).finally(() => setLoading(false));
+  useEffect(() => { void load(); }, []);
+  const connect = async (id: string) => { setWorking(id); const response = await fetch(`/api/integrations/${id}/connect`, { cache: "no-store" }).catch(() => null); const payload = response ? await response.json().catch(() => null) as { authorizationUrl?: string; error?: string; missing?: string[] } | null : null; if (!response?.ok || !payload?.authorizationUrl) { flash(payload?.missing?.length ? `Add these private environment variables: ${payload.missing.join(", ")}` : payload?.error || "The provider connection could not start."); setWorking(null); return; } window.location.assign(payload.authorizationUrl); };
+  const disconnect = async (id: string) => { setWorking(id); const response = await fetch(`/api/integrations/${id}/disconnect`, { method: "DELETE" }).catch(() => null); if (!response?.ok) flash("The integration could not be disconnected."); else { flash("Integration disconnected."); await load(); } setWorking(null); };
+  const test = async (id: string) => { setWorking(id); const response = await fetch(`/api/integrations/${id}/test`, { method: "POST" }).catch(() => null); const payload = response ? await response.json().catch(() => null) as { error?: string; accountName?: string } | null : null; flash(response?.ok ? `${payload?.accountName || "Provider"} connection verified.` : payload?.error || "Connection test failed."); setWorking(null); };
+  const gustoFlow = async (flowType: "company_onboarding" | "employee_management" | "run_payroll" | "payroll_history") => { setWorking("gusto"); await openGustoFlow(flowType, flash); setWorking(null); };
+  return <div className="settings-reference settings-feature-page"><SettingsSectionNav active="integrations" onNavigate={onNavigate} /><main className="settings-reference-main"><header className="settings-feature-head"><div><p className="eyebrow">LIVE CONNECTIONS</p><h1>Integrations</h1><p>Authorize providers securely, verify access, and disconnect accounts from one place.</p></div></header><div className="settings-integration-note"><strong>Secure OAuth</strong><span>Provider passwords never pass through CoreShift. Access and refresh tokens are encrypted before storage and isolated by business.</span></div><section className="settings-integration-grid">{providers.map((provider) => { const status = statuses[provider.id]; const connected = status?.connected; const configured = status?.configured; return <article className="settings-integration-card live" key={provider.id}><div className="integration-card-head"><span>{provider.badge}</span><div><h3>{provider.name}</h3><em className={connected ? "connected" : configured ? "ready" : ""}>{loading ? "Checking" : connected ? "Connected" : configured ? "Ready to connect" : "Configuration needed"}</em></div></div><p>{provider.description}</p>{connected ? <div className="integration-account"><strong>{status.accountName || provider.name}</strong><span>Connected {status.connectedAt ? new Date(status.connectedAt).toLocaleDateString() : "recently"}</span></div> : <div className="integration-requirements"><strong>{configured ? "Provider app is configured" : "Private credentials required"}</strong><span>{configured ? "Continue to the provider consent screen." : status?.missing?.join(", ") || "Loading configuration..."}</span>{status?.callbackUrl && <small>Callback: {status.callbackUrl}</small>}</div>}<div className="integration-live-actions">{connected ? provider.id === "gusto" ? <><button className="primary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("company_onboarding")}>{working === provider.id ? "Opening..." : "Company setup"}</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("employee_management")}>Employees</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("run_payroll")}>Run payroll</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("payroll_history")}>History</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void test(provider.id)}>Test</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void disconnect(provider.id)}>Disconnect</button></> : <><button className="primary-button" type="button" disabled={working === provider.id} onClick={() => void test(provider.id)}>{working === provider.id ? "Checking..." : "Test connection"}</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void disconnect(provider.id)}>Disconnect</button></> : <button className="primary-button" type="button" disabled={loading || working === provider.id} onClick={() => void connect(provider.id)}>{working === provider.id ? "Opening..." : configured ? `Connect ${provider.name}` : "Show required setup"}</button>}</div></article>; })}</section><section className="panel integration-launch-note"><h2>Provider setup</h2><p>Gusto Flows securely handle company onboarding, bank verification, tax setup, employees, payroll review, direct deposits, and payroll history. Demo mode never moves real money; production requires Gusto approval.</p></section></main></div>;
+}
+
+function SecuritySettingsPage({ flash, onNavigate }: { flash: (message: string) => void; onNavigate: (section: SettingsSection) => void }) {
+  const defaults: SecurityState = { loginAlerts: true, requireTwoFactor: false, rememberDevices: true, restrictUnknownDevices: false, sessionTimeoutMinutes: 60 };
+  const [security, setSecurity] = useState(defaults);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => { fetch("/api/settings/workspace", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ settings: { security: SecurityState } }> : Promise.reject()).then((payload) => setSecurity({ ...defaults, ...(payload.settings.security || {}) })).catch(() => flash("Security settings could not be loaded.")).finally(() => setLoading(false)); }, []);
+  const update = async (changes: Partial<SecurityState>, message: string) => { const previous = security; const next = { ...security, ...changes }; setSecurity(next); setSaving(true); try { await saveWorkspaceSettings({ security: next }); flash(message); } catch (error) { setSecurity(previous); flash(error instanceof Error ? error.message : "Security settings could not be saved."); } finally { setSaving(false); } };
+  const toggle = (key: keyof SecurityState, title: string, description: string) => <label className="settings-security-control"><div><strong>{title}</strong><span>{description}</span></div><input type="checkbox" checked={Boolean(security[key])} disabled={loading} onChange={(event) => void update({ [key]: event.target.checked }, `${title} ${event.target.checked ? "enabled" : "disabled"}.`)} /><i /></label>;
+  return <div className="settings-reference settings-feature-page"><SettingsSectionNav active="security" onNavigate={onNavigate} /><main className="settings-reference-main"><header className="settings-feature-head"><div><p className="eyebrow">ACCOUNT PROTECTION</p><h1>Security</h1><p>Control sign-in policies, trusted devices, and owner alerts for this business.</p></div><span className="security-health">Good standing</span></header><section className="security-overview"><article><span>01</span><div><strong>Business data isolation</strong><p>Settings are stored separately for this business account.</p></div><em>Active</em></article><article><span>02</span><div><strong>Owner-only changes</strong><p>Only an owner can update workspace security policies.</p></div><em>Active</em></article><article><span>03</span><div><strong>Two-step verification</strong><p>Require an additional verification step for owner and manager access.</p></div><em className={security.requireTwoFactor ? "active" : "attention"}>{security.requireTwoFactor ? "Required" : "Optional"}</em></article></section><section className="panel security-policy-card"><div className="settings-feature-section-head"><div><h2>Sign-in policies</h2><p>Changes save automatically for this workspace.</p></div>{saving && <span>Saving...</span>}</div>{toggle("loginAlerts", "Login alerts", "Notify owners when a new device signs in.")}{toggle("requireTwoFactor", "Require two-step verification", "Set the workspace policy for owners and managers.")}{toggle("rememberDevices", "Allow remembered devices", "Let approved devices reduce repeated sign-in prompts.")}{toggle("restrictUnknownDevices", "Review unknown devices", "Flag new devices for owner review before they are trusted.")}<div className="security-session-row"><div><strong>Automatic sign-out</strong><span>End inactive owner sessions after this amount of time.</span></div><select value={security.sessionTimeoutMinutes} disabled={loading} onChange={(event) => void update({ sessionTimeoutMinutes: Number(event.target.value) }, "Session timeout updated.")}><option value={15}>15 minutes</option><option value={30}>30 minutes</option><option value={60}>1 hour</option><option value={240}>4 hours</option><option value={480}>8 hours</option></select></div></section><section className="panel security-actions-card"><div><h2>Security actions</h2><p>Use these tools when access to the business changes.</p></div><button type="button" onClick={() => flash("Active session review opened.")}>Review active sessions<span>View</span></button><button type="button" onClick={() => flash("Security activity report is ready.")}>Download security activity<span>Export</span></button><button type="button" onClick={() => flash("Owner access is managed from Account settings.")}>Manage owner access<span>Open Account</span></button></section></main></div>;
+}
+
 function Settings({ flash, businessName, ownerName, ownerEmail }: { flash: (message: string) => void; businessName: string; ownerName: string; ownerEmail: string }) {
   const [rounding, setRounding] = useState("Exact time");
   const [timeFormat, setTimeFormat] = useState<"24" | "12">("24");
   const [fontSize, setFontSize] = useState<AppFontSize>("large");
-  const [section, setSection] = useState<"general" | "time" | "access" | "owners" | "notifications" | "billing" | "scheduling" | "pay">("general");
+  const [section, setSection] = useState<SettingsSection>("general");
   const [editingSetting, setEditingSetting] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [organizationDraft, setOrganizationDraft] = useState({ name: businessName || "Main Street Café", address: "123 Main Street\nLeague City, TX 77573", email: "hello@mainstreetcafe.com", timeZone: "Central Time (CT)", industry: "Food & Beverage", companySize: "Team workspace", weekStarts: "Sunday" });
+  useEffect(() => { const params = new URLSearchParams(window.location.search); if (params.get("section") === "integrations") setSection("integrations"); const connected = params.get("integration_connected"); const error = params.get("integration_error"); if (connected) flash(`${connected} connected successfully.`); if (error) flash(error); if (connected || error) window.history.replaceState({}, "", window.location.pathname); }, []);
   useEffect(() => {
     if (editingSetting !== "organization-info") return;
     const timer = window.setTimeout(() => {
@@ -3127,8 +3481,8 @@ function Settings({ flash, businessName, ownerName, ownerEmail }: { flash: (mess
     window.setTimeout(() => applyAppFontSize(value), 0);
     flash(value === "standard" ? "Standard text size enabled." : "Larger text enabled across the workspace.");
   }
-  const navigate = (target: "general" | "time" | "access" | "owners" | "notifications" | "billing" | "scheduling" | "pay") => setSection(target);
-  const settingsFlash = (message: string) => { const match = message.match(/^(Organization|Billing & Subscription|Locations|Departments|Roles & Permissions|Time & Attendance|Scheduling|Pay & Overtime|Notifications|Integrations|Account|Security) settings opened\.$/); const routes: Record<string, typeof section> = { Organization: "general", "Billing & Subscription": "billing", Locations: "general", Departments: "general", "Roles & Permissions": "access", "Time & Attendance": "time", Scheduling: "scheduling", "Pay & Overtime": "pay", Notifications: "notifications", Integrations: "general", Account: "owners", Security: "access" }; if (match) setSection(routes[match[1]]); flash(message); };
+  const navigate = (target: SettingsSection) => setSection(target);
+  const settingsFlash = (message: string) => { const match = message.match(/^(Organization|Billing & Subscription|Locations|Departments|Roles & Permissions|Time & Attendance|Scheduling|Pay & Overtime|Notifications|Integrations|Account|Security) settings opened\.$/); const routes: Record<string, SettingsSection> = { Organization: "general", "Billing & Subscription": "billing", Locations: "locations", Departments: "general", "Roles & Permissions": "access", "Time & Attendance": "time", Scheduling: "scheduling", "Pay & Overtime": "pay", Notifications: "notifications", Integrations: "integrations", Account: "owners", Security: "security" }; if (match) setSection(routes[match[1]]); flash(message); };
   useEffect(() => {
     const handleSettingsButton = (event: MouseEvent) => {
       const button = (event.target as HTMLElement | null)?.closest("button");
@@ -3145,7 +3499,7 @@ function Settings({ flash, businessName, ownerName, ownerEmail }: { flash: (mess
         window.setTimeout(() => setSection("pay"), 0);
         if (/^pay\s*&\s*overtime(?:\s*[›→])?$/.test(label)) return;
       }
-      const route = label.includes("billing") ? "billing" : label.includes("notification") ? "notifications" : label.includes("pay") ? "pay" : label.includes("schedule") ? "scheduling" : label.includes("time") || label.includes("attendance") ? "time" : label.includes("role") || label.includes("permission") || label.includes("security") ? "access" : label.includes("account") ? "owners" : label.includes("organization") || label.includes("location") || label.includes("integration") ? "general" : null;
+      const route: SettingsSection | null = label.includes("billing") ? "billing" : label.includes("notification") ? "notifications" : label.includes("pay") ? "pay" : label.includes("schedule") ? "scheduling" : label.includes("time") || label.includes("attendance") ? "time" : label.includes("security") ? "security" : label.includes("role") || label.includes("permission") ? "access" : label.includes("account") ? "owners" : label.includes("location") ? "locations" : label.includes("integration") ? "integrations" : label.includes("organization") ? "general" : null;
       if (button.closest(".settings-reference-nav")) {
         if (route) setSection(route);
         return;
@@ -3172,6 +3526,9 @@ function Settings({ flash, businessName, ownerName, ownerEmail }: { flash: (mess
   else if (section === "owners") settingsPage = <AccountSettingsExact flash={settingsFlash} onNavigate={navigate} ownerName={ownerName} ownerEmail={ownerEmail} />;
   else if (section === "notifications") settingsPage = <NotificationsSettingsExact flash={settingsFlash} onNavigate={navigate} />;
   else if (section === "pay") settingsPage = <PersistentPayOvertimeSettingsPage flash={settingsFlash} onNavigate={navigate} />;
+  else if (section === "locations") settingsPage = <LocationsSettingsPage flash={settingsFlash} onNavigate={navigate} />;
+  else if (section === "integrations") settingsPage = <LiveIntegrationsSettingsPage flash={settingsFlash} onNavigate={navigate} />;
+  else if (section === "security") settingsPage = <SecuritySettingsPage flash={settingsFlash} onNavigate={navigate} />;
   else settingsPage = <SettingsReference businessName={businessName} organization={organizationDraft} flash={flash} section={section} setSection={setSection} rounding={rounding} timeFormat={timeFormat} updateTimeFormat={updateTimeFormat} fontSize={fontSize} updateFontSize={updateFontSize} />;
   return <>{settingsPage}{editingSetting === "organization-info" && <div className="modal-backdrop settings-action-backdrop" role="presentation"><form className="modal-card organization-edit-modal" onSubmit={(event) => { event.preventDefault(); window.localStorage.setItem("coreshift-organization", JSON.stringify(organizationDraft)); setEditingSetting(null); flash("Organization information saved."); }}><div className="modal-head"><div><p className="eyebrow">Organization profile</p><h2>Edit organization info</h2><p>Update your company details in one organized form.</p></div><button type="button" onClick={() => setEditingSetting(null)} aria-label="Close">×</button></div><div className="modal-body organization-edit-grid"><label>Company name<input autoFocus value={organizationDraft.name} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, name: event.target.value }))} /></label><label>Business email<input type="email" value={organizationDraft.email} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, email: event.target.value }))} /></label><label className="organization-edit-wide">Business address<textarea rows={2} value={organizationDraft.address} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, address: event.target.value }))} /></label><label>Time zone<select value={organizationDraft.timeZone} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, timeZone: event.target.value }))}><option>Central Time (CT)</option><option>Eastern Time (ET)</option><option>Mountain Time (MT)</option><option>Pacific Time (PT)</option></select></label><label>Industry<input value={organizationDraft.industry} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, industry: event.target.value }))} /></label><label>Company size<input value={organizationDraft.companySize} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, companySize: event.target.value }))} /></label><label>Week starts on<select value={organizationDraft.weekStarts} onChange={(event) => setOrganizationDraft((draft) => ({ ...draft, weekStarts: event.target.value }))}><option>Sunday</option><option>Monday</option></select></label><div className="modal-actions organization-edit-actions"><button type="button" className="secondary-button" onClick={() => setEditingSetting(null)}>Cancel</button><button type="submit" className="primary-button">Save organization</button></div></div></form></div>}{editingSetting && editingSetting !== "organization-info" && <div className="modal-backdrop settings-action-backdrop" role="presentation"><form className="modal-card settings-action-modal" onSubmit={(event) => { event.preventDefault(); window.localStorage.setItem(editingSetting, editingValue); setEditingSetting(null); flash("Draft saved."); }}><div className="modal-head"><div><p className="eyebrow">Settings draft</p><h2>Edit setting</h2><p>Your changes are a draft until you save them.</p></div><button type="button" onClick={() => setEditingSetting(null)} aria-label="Close">×</button></div><div className="modal-body"><label>Draft value<textarea autoFocus value={editingValue} onChange={(event) => setEditingValue(event.target.value)} rows={4} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => { setEditingSetting(null); flash("Draft discarded."); }}>Discard draft</button><button type="submit" className="primary-button">Save draft</button></div></div></form></div>}</>;
   return <div className="settings-layout">
@@ -3537,7 +3894,7 @@ function BillingReference({ flash }: { flash: (message: string) => void }) {
   return <section className="billing-reference"><div className="panel billing-heading"><h2>Billing &amp; Subscriptions</h2><p>Manage your plan, payment methods, and subscription settings.</p></div><div className="billing-grid"><article className="panel billing-plan"><PanelHead title="Current Plan" action={<button className="text-button" onClick={() => flash("Plan options opened.")}>Change plan</button>} /><div className="billing-plan-main"><span className="billing-shield">✦</span><div><h3>CoreShift Pro <span>Active</span></h3><strong>$50 per user / month</strong><p>Billed annually</p></div></div><dl><dt>Users</dt><dd>Team workspace / Unlimited</dd><dt>Billing Cycle</dt><dd>Annual　<span className="billing-save">Save 20%</span></dd><dt>Next Billing Date</dt><dd>June 15, 2025</dd><dt>Next Billing Amount</dt><dd>$1,150.00 USD</dd></dl></article><article className="panel billing-features"><PanelHead title="Plan Features" />{["Unlimited users","Advanced scheduling","Time tracking","Overtime & break rules","Custom reports","Integrations","Priority support"].map((item) => <div key={item}>●　{item}</div>)}<button className="secondary-button" type="button" onClick={() => flash("Plan comparison opened.")}>Compare Plans</button></article><article className="panel billing-history"><PanelHead title="Billing History" action={<button className="text-button" onClick={() => flash("All invoices opened.")}>View all invoices →</button>} /><div className="billing-history-head"><span>Date</span><span>Description</span><span>Amount</span><span>Status</span></div>{["May 15, 2024","May 15, 2023","May 15, 2022","May 15, 2021"].map((date) => <div className="billing-history-row" key={date}><span>{date}</span><span>Pro Plan – Annual</span><strong>$1,150.00</strong><em>Paid</em></div>)}</article><article className="panel billing-methods"><PanelHead title="Payment Methods" action={<button className="text-button" onClick={() => flash("Add payment method opened.")}>＋ Add New</button>} /><div className="billing-method"><strong>VISA ending in 4242</strong><span>Default · Expires 08/26</span></div><div className="billing-method"><strong>Mastercard ending in 8888</strong><span>Expires 11/25</span></div><button className="text-button" type="button" onClick={() => flash("Payment methods opened.")}>Manage payment methods →</button></article><article className="panel billing-usage"><PanelHead title="Usage & Limits" />{[["Users","23 / Unlimited","purple"],["Time Clock Entries","1,248 / Unlimited","orange"],["Storage","2.4 GB / Unlimited","green"]].map(([label,value,color]) => <div className="billing-usage-item" key={label}><span className={`settings-ref-icon ${color}`}>◷</span><strong>{label}<small>{value}</small></strong><i className={color} /></div>)}</article><article className="panel billing-actions"><PanelHead title="Subscription Actions" />{["Upgrade Plan","Downgrade Plan","Pause Subscription","Cancel Subscription"].map((item) => <button type="button" key={item} onClick={() => flash(`${item} opened.`)}>{item}<span>›</span></button>)}</article></div></section>;
 }
 
-function SettingsReference({ businessName, flash, section, setSection, rounding, timeFormat, updateTimeFormat, fontSize, updateFontSize }: { businessName: string; flash: (message: string) => void; section: "general" | "time" | "access" | "owners" | "notifications" | "billing" | "scheduling" | "pay"; setSection: (section: "general" | "time" | "access" | "owners" | "notifications" | "billing" | "scheduling" | "pay") => void; rounding: string; timeFormat: "24" | "12"; updateTimeFormat: (value: "24" | "12") => void; fontSize: AppFontSize; updateFontSize: (value: AppFontSize) => void }) {
+function SettingsReference({ businessName, flash, section, setSection, rounding, timeFormat, updateTimeFormat, fontSize, updateFontSize }: { businessName: string; flash: (message: string) => void; section: SettingsSection; setSection: (section: SettingsSection) => void; rounding: string; timeFormat: "24" | "12"; updateTimeFormat: (value: "24" | "12") => void; fontSize: AppFontSize; updateFontSize: (value: AppFontSize) => void }) {
   useEffect(() => {
     const renderOrganization = () => {
       try {
@@ -3560,9 +3917,8 @@ function SettingsReference({ businessName, flash, section, setSection, rounding,
     const timer = window.setInterval(renderOrganization, 500);
     return () => { window.removeEventListener("coreshift-organization-updated", renderOrganization); window.clearInterval(timer); };
   }, []);
-  const nav = [["general", "Organization", "Company profile and details"], ["billing", "Billing & Subscription", "Manage your plan and billing"], ["general", "Locations", "Manage your locations"], ["access", "Roles & Permissions", "Control access and permissions"], ["time", "Time & Attendance", "Rules and time tracking"], ["scheduling", "Scheduling", "Scheduling preferences"], ["pay", "Pay & Overtime", "Pay rates and overtime rules"], ["notifications", "Notifications", "Notification preferences"], ["general", "Integrations", "Connected apps and services"], ["owners", "Account", "Your account settings"], ["access", "Security", "Password and security"]] as const;
-  const card = (icon: string, title: string, desc: string, color: string, items: string[], target: "general" | "time" | "access" | "owners" | "notifications" | "pay") => <article className="settings-ref-card"><div className="settings-ref-card-head"><span className={`settings-ref-icon ${color}`}>{icon}</span><div><strong>{title}</strong><p>{desc}</p></div></div>{items.map((item) => <button type="button" key={item} onClick={() => { setSection(title === "Pay & Overtime" ? "pay" : target); flash(`${item} settings opened.`); }}>{item}<span>›</span></button>)}</article>;
-  return <div className="settings-reference"><aside className="settings-reference-nav"><div className="settings-ref-nav-list">{nav.map(([key, title, desc], index) => <button type="button" className={index === 0 && section === "general" ? "active" : section === key ? "active" : ""} key={`${title}-${index}`} onClick={() => setSection(key)}><span>{["▥", "▣", "⌖", "♙", "◷", "▦", "$", "♧", "✣", "♙", "▣"][index]}</span><div><strong>{title}</strong><small>{desc}</small></div></button>)}</div><div className="settings-ref-promo"><strong>Customize your experience</strong><p>Adjust preferences and automate rules to save time.</p><button type="button" onClick={() => flash("Settings help opened.")}>Learn more</button></div></aside><div className="settings-reference-main"><section className="panel settings-organization"><div className="settings-ref-panel-head"><div><h2>Organization Settings</h2><p>Company profile and details</p></div><button className="secondary-button" type="button" onClick={() => flash("Organization editing is ready.")}>✎　Edit Organization Info</button></div><div className="organization-details"><div className="organization-logo">▱</div><div><h3>{businessName || "Main Street Café"} <span>Active</span></h3><p>⌖　123 Main Street<br />　　League City, TX 77573</p><p>✉　hello@{(businessName || "mainstreetcafe").toLowerCase().replace(/[^a-z0-9]/g, "")}.com</p><p>◉　Central Time (CT)</p></div><dl><dt>Industry</dt><dd>Food &amp; Beverage</dd><dt>Company Size</dt><dd>Team workspace</dd><dt>Week Starts On</dt><dd>Sunday</dd></dl></div></section><div className="settings-ref-grid">{card("◷", "Time & Attendance", "Set clock in/out rules, breaks, overtime, and attendance policies.", "purple", ["Attendance Policies", "Break Rules", "Overtime Rules", `Time Rounding · ${rounding}`], "time")}{card("▦", "Scheduling", "Configure scheduling settings, shift rules, and availability.", "green", ["Schedule Preferences", "Shift & Time Off Settings", "Availability Rules", "Auto-Scheduling · Enabled"], "general")}{card("$", "Pay & Overtime", "Manage pay rates, overtime, differentials, and pay periods.", "orange", ["Pay Rates", "Overtime & Differentials", "Pay Periods · Weekly", "Pay Day · Friday"], "owners")}{card("♧", "Notifications", "Control how and when you receive alerts and notifications.", "purple", ["Email Notifications", "Push Notifications", "Request Notifications", "Reminder Settings"], "notifications")}{card("♙", "Roles & Permissions", "Manage user roles and control what each role can access.", "green", ["User Roles", "Permission Groups", "Team Access", "Manage Admins"], "access")}{card("✣", "Integrations", "Connect with other tools and services you already use.", "purple", ["QuickBooks Online · Connected", "Gusto · Connected", "Google Calendar · Connect", "Slack · Connect"], "general")}</div><section className="panel settings-security"><div className="settings-ref-card-head"><span className="settings-ref-icon purple">▣</span><div><strong>Account &amp; Security</strong><p>Manage your account settings and keep your data secure.</p></div></div><div className="settings-security-grid"><button type="button" onClick={() => flash("Change password opened.")}>Change Password　›</button><label>Time Display<select value={timeFormat} onChange={(event) => updateTimeFormat(event.target.value as "24" | "12")}><option value="12">12-hour</option><option value="24">24-hour</option></select></label><label>Workspace Text Size<select value={fontSize} onChange={(event) => updateFontSize(event.target.value as AppFontSize)}><option value="large">Large</option><option value="larger">Very large</option><option value="largest">Extra large</option><option value="standard">Standard</option></select></label><button type="button" onClick={() => flash("Data export is ready.")}>Data Export　›</button></div></section></div></div>;
+  const card = (icon: string, title: string, desc: string, color: string, items: string[], target: SettingsSection) => <article className="settings-ref-card"><div className="settings-ref-card-head"><span className={`settings-ref-icon ${color}`}>{icon}</span><div><strong>{title}</strong><p>{desc}</p></div></div>{items.map((item) => <button type="button" key={item} onClick={() => { setSection(title === "Pay & Overtime" ? "pay" : target); flash(`${item} settings opened.`); }}>{item}<span>›</span></button>)}</article>;
+  return <div className="settings-reference"><SettingsSectionNav active={section} onNavigate={setSection} /><div className="settings-reference-main"><section className="panel settings-organization"><div className="settings-ref-panel-head"><div><h2>Organization Settings</h2><p>Company profile and details</p></div><button className="secondary-button" type="button" onClick={() => flash("Organization editing is ready.")}>✎　Edit Organization Info</button></div><div className="organization-details"><div className="organization-logo">▱</div><div><h3>{businessName || "Main Street Café"} <span>Active</span></h3><p>⌖　123 Main Street<br />　　League City, TX 77573</p><p>✉　hello@{(businessName || "mainstreetcafe").toLowerCase().replace(/[^a-z0-9]/g, "")}.com</p><p>◉　Central Time (CT)</p></div><dl><dt>Industry</dt><dd>Food &amp; Beverage</dd><dt>Company Size</dt><dd>Team workspace</dd><dt>Week Starts On</dt><dd>Sunday</dd></dl></div></section><div className="settings-ref-grid">{card("◷", "Time & Attendance", "Set clock in/out rules, breaks, overtime, and attendance policies.", "purple", ["Attendance Policies", "Break Rules", "Overtime Rules", `Time Rounding · ${rounding}`], "time")}{card("▦", "Scheduling", "Configure scheduling settings, shift rules, and availability.", "green", ["Schedule Preferences", "Shift & Time Off Settings", "Availability Rules", "Auto-Scheduling · Enabled"], "scheduling")}{card("$", "Pay & Overtime", "Manage pay rates, overtime, differentials, and pay periods.", "orange", ["Pay Rates", "Overtime & Differentials", "Pay Periods · Weekly", "Pay Day · Friday"], "pay")}{card("♧", "Notifications", "Control how and when you receive alerts and notifications.", "purple", ["Email Notifications", "Push Notifications", "Request Notifications", "Reminder Settings"], "notifications")}{card("♙", "Roles & Permissions", "Manage user roles and control what each role can access.", "green", ["User Roles", "Permission Groups", "Team Access", "Manage Admins"], "access")}{card("✣", "Integrations", "Connect with other tools and services you already use.", "purple", ["QuickBooks Online", "Gusto", "Google Calendar", "Slack"], "integrations")}</div><section className="panel settings-security"><div className="settings-ref-card-head"><span className="settings-ref-icon purple">▣</span><div><strong>Account &amp; Security</strong><p>Manage your account settings and keep your data secure.</p></div></div><div className="settings-security-grid"><button type="button" onClick={() => setSection("security")}>Security Policies　›</button><label>Time Display<select value={timeFormat} onChange={(event) => updateTimeFormat(event.target.value as "24" | "12")}><option value="12">12-hour</option><option value="24">24-hour</option></select></label><label>Workspace Text Size<select value={fontSize} onChange={(event) => updateFontSize(event.target.value as AppFontSize)}><option value="large">Large</option><option value="larger">Very large</option><option value="largest">Extra large</option><option value="standard">Standard</option></select></label><button type="button" onClick={() => flash("Data export is ready.")}>Data Export　›</button></div></section></div></div>;
 }
 
 function MessagingSetting({ flash }: { flash: (message: string) => void }) {

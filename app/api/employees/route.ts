@@ -1,5 +1,6 @@
 import { database, ensureDatabase } from "../../../db/runtime";
 import { getViewer } from "../../../db/viewer";
+import { ensureWorkspaceEightDigitCodes } from "../../../db/employee-codes";
 
 export async function GET() {
   const viewer = await getViewer();
@@ -8,7 +9,27 @@ export async function GET() {
   }
   await ensureDatabase();
   const db = database();
+  if (viewer.access === "owner") await ensureWorkspaceEightDigitCodes(db, viewer.businessId);
   const now = Date.now();
+  const paySettingsRow = await db.prepare("SELECT value FROM workspace_settings WHERE key = ?").bind(`pay_settings:${viewer.businessId}`).first<{ value: string }>();
+  let paySettings: { frequency?: string; payPeriod?: string; payDay?: string; payPeriodStarts?: string; overtimeEnabled?: boolean } = {};
+  try { paySettings = paySettingsRow?.value ? JSON.parse(paySettingsRow.value) : {}; } catch { /* use payroll defaults */ }
+  const storedPeriod = String(paySettings.payPeriod ?? "");
+  const payFrequency = storedPeriod.startsWith("Biweekly") || paySettings.frequency === "Biweekly" ? "Biweekly" : "Weekly";
+  const payPeriodDays = payFrequency === "Biweekly" ? 14 : 7;
+  const weekdayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const payPeriodStartDay = Math.max(0, weekdayNames.indexOf(paySettings.payPeriodStarts ?? "Sunday"));
+  const payPeriodStartDate = new Date(now);
+  payPeriodStartDate.setHours(0, 0, 0, 0);
+  payPeriodStartDate.setDate(payPeriodStartDate.getDate() - ((payPeriodStartDate.getDay() - payPeriodStartDay + 7) % 7));
+  if (payPeriodDays === 14) payPeriodStartDate.setDate(payPeriodStartDate.getDate() - 7);
+  const currentPayPeriodStart = payPeriodStartDate.getTime();
+  const currentPayPeriodEndExclusive = currentPayPeriodStart + payPeriodDays * 24 * 60 * 60 * 1000;
+  const currentPayPeriodEnd = currentPayPeriodEndExclusive - 1;
+  const configuredPayDay = Math.max(0, weekdayNames.indexOf(paySettings.payDay ?? "Friday"));
+  const nextPayDateValue = new Date(currentPayPeriodEndExclusive);
+  nextPayDateValue.setDate(nextPayDateValue.getDate() + ((configuredPayDay - nextPayDateValue.getDay() + 7) % 7));
+  const nextPayDate = nextPayDateValue.getTime();
   const currentDate = new Date(now);
   const calendarWeek = new Date(currentDate);
   calendarWeek.setHours(0, 0, 0, 0);
@@ -54,6 +75,23 @@ export async function GET() {
     weeklyMinutes: number; monthMinutes: number; totalMinutes: number; totalShifts: number;
   }>();
 
+  const payPeriodQuery = db.prepare(`
+    SELECT e.id AS employeeId,
+      COALESCE(SUM(CASE
+        WHEN t.clock_in < ? AND COALESCE(t.clock_out, ?) > ?
+        THEN (MIN(COALESCE(t.clock_out, ?), ?) - MAX(t.clock_in, ?)) / 60000
+        ELSE 0 END), 0) AS minutes
+    FROM employees e
+    LEFT JOIN time_entries t ON t.employee_id = e.id
+    WHERE e.active = 1 AND e.business_id = ? ${employeeFilter}
+    GROUP BY e.id
+  `);
+  const payPeriodRows = await (viewer.access === "employee"
+    ? payPeriodQuery.bind(currentPayPeriodEndExclusive, now, currentPayPeriodStart, now, currentPayPeriodEndExclusive, currentPayPeriodStart, viewer.businessId, viewer.employeeId)
+    : payPeriodQuery.bind(currentPayPeriodEndExclusive, now, currentPayPeriodStart, now, currentPayPeriodEndExclusive, currentPayPeriodStart, viewer.businessId)
+  ).all<{ employeeId: number; minutes: number }>();
+  const payPeriodMinutesByEmployee = new Map(payPeriodRows.results.map((row) => [row.employeeId, Math.round(row.minutes)]));
+
   const calendarDay = new Date(now);
   calendarDay.setHours(0, 0, 0, 0);
   calendarDay.setDate(calendarDay.getDate() - ((calendarDay.getDay() + 6) % 7));
@@ -89,6 +127,12 @@ export async function GET() {
 
   return Response.json(result.results.map((row) => {
     const weeklyMinutes = Math.round(row.weeklyMinutes);
+    const currentPayPeriodMinutes = payPeriodMinutesByEmployee.get(row.id) ?? 0;
+    const overtimeThresholdMinutes = payPeriodDays === 14 ? 4800 : 2400;
+    const overtimeEnabled = paySettings.overtimeEnabled !== false;
+    const regularPayPeriodMinutes = overtimeEnabled ? Math.min(currentPayPeriodMinutes, overtimeThresholdMinutes) : currentPayPeriodMinutes;
+    const overtimePayPeriodMinutes = overtimeEnabled ? Math.max(0, currentPayPeriodMinutes - overtimeThresholdMinutes) : 0;
+    const currentPayPeriodEarningsCents = Math.round((regularPayPeriodMinutes / 60) * row.hourlyRateCents + (overtimePayPeriodMinutes / 60) * row.hourlyRateCents * 1.5);
     return {
       id: row.id,
       name: row.name,
@@ -110,7 +154,12 @@ export async function GET() {
       monthMinutes: Math.round(row.monthMinutes),
       totalMinutes: Math.round(row.totalMinutes),
       totalShifts: Math.round(row.totalShifts),
-      currentPayPeriodEarningsCents: Math.round((weeklyMinutes / 60) * row.hourlyRateCents),
+      currentPayPeriodMinutes,
+      currentPayPeriodEarningsCents,
+      currentPayPeriodStart,
+      currentPayPeriodEnd,
+      payFrequency,
+      nextPayDate,
       // Keep the timestamp intact; the browser formats it in the user's timezone.
       clockIn: row.clockInMs ? new Date(row.clockInMs).toISOString() : null,
     };

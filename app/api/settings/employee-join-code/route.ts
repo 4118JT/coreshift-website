@@ -1,6 +1,6 @@
-import { generateAccessCode } from "../../../../db/app-auth";
 import { database, ensureDatabase } from "../../../../db/runtime";
 import { getViewer } from "../../../../db/viewer";
+import { createUniqueEightDigitCode, ensureWorkspaceEightDigitCodes } from "../../../../db/employee-codes";
 
 async function requireOwner() {
   const viewer = await getViewer();
@@ -13,6 +13,7 @@ export async function GET() {
     return Response.json({ error: "Owner access required" }, { status: 403 });
   }
   await ensureDatabase();
+  await ensureWorkspaceEightDigitCodes(database(), viewer.businessId);
   const business = await database().prepare(
     "SELECT employee_join_code AS code FROM businesses WHERE id = ?"
   ).bind(viewer.businessId).first<{ code: string | null }>();
@@ -27,7 +28,7 @@ export async function POST() {
   await ensureDatabase();
 
   for (let attempt = 0; attempt < 6; attempt += 1) {
-    const code = generateAccessCode();
+    const code = await createUniqueEightDigitCode(database());
     const existing = await database().prepare(
       "SELECT id FROM businesses WHERE employee_join_code = ?"
     ).bind(code).first<{ id: string }>();

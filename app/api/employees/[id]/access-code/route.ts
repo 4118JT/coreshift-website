@@ -1,6 +1,7 @@
-import { generateAccessCode, hashCredential } from "../../../../../db/app-auth";
+import { hashCredential } from "../../../../../db/app-auth";
 import { database, ensureDatabase } from "../../../../../db/runtime";
 import { getViewer } from "../../../../../db/viewer";
+import { createUniqueEightDigitCode } from "../../../../../db/employee-codes";
 
 export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
   const viewer = await getViewer();
@@ -19,7 +20,11 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
   if (!employee?.email) {
     return Response.json({ error: "Add the employee’s login email first." }, { status: 400 });
   }
-  const accessCode = generateAccessCode();
+  let accessCode = "";
+  try { accessCode = await createUniqueEightDigitCode(database()); } catch {}
+  if (!accessCode) {
+    return Response.json({ error: "A unique employee code could not be created. Try again." }, { status: 500 });
+  }
   await database().prepare(
     "UPDATE employees SET access_code_hash = ?, employee_code = ? WHERE id = ? AND business_id = ?"
   ).bind(await hashCredential(accessCode), accessCode, employeeId, viewer.businessId).run();

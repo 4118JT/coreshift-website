@@ -7,6 +7,7 @@ export type Viewer =
       email: string;
       displayName: string;
       employeeId: null;
+      actorId: number;
       businessId: string;
       businessName: string;
     }
@@ -15,6 +16,7 @@ export type Viewer =
       email: string;
       displayName: string;
       employeeId: number;
+      actorId: number;
       businessId: string;
       businessName: string;
     }
@@ -23,6 +25,7 @@ export type Viewer =
       email: null;
       displayName: string;
       employeeId: null;
+      actorId: number;
       businessId: null;
       businessName: null;
     };
@@ -30,7 +33,7 @@ export type Viewer =
 export async function getViewer(): Promise<Viewer> {
   const cookieStore = await cookies();
   if (cookieStore.get("hourmark_demo")?.value === "1") {
-    return { access: "owner", email: "demo@example.invalid", displayName: "Demo Owner", employeeId: null, businessId: "__coreshift_demo__", businessName: "CoreShift Demo" };
+    return { access: "owner", email: "demo@example.invalid", displayName: "Demo Owner", employeeId: null, actorId: 0, businessId: "__coreshift_demo__", businessName: "CoreShift Demo" };
   }
   const appSession = await getAppSession(
     cookieStore.get("hourmark_session")?.value,
@@ -48,6 +51,7 @@ export async function getViewer(): Promise<Viewer> {
       email: appSession.employeeId ? (appSession.email ?? "") : (appSession.ownerEmail ?? ""),
       displayName: appSession.employeeId ? (appSession.name ?? appSession.ownerName ?? "Owner") : appSession.ownerName,
       employeeId: null,
+      actorId: appSession.employeeId ? -appSession.employeeId : appSession.ownerId,
       businessId: appSession.businessId,
       businessName: appSession.businessName,
     };
@@ -64,6 +68,7 @@ export async function getViewer(): Promise<Viewer> {
       email: appSession.email ?? "",
       displayName: appSession.name,
       employeeId: appSession.employeeId,
+      actorId: appSession.employeeId,
       businessId: appSession.businessId,
       businessName: appSession.businessName,
     };
@@ -74,6 +79,7 @@ export async function getViewer(): Promise<Viewer> {
     email: null,
     displayName: "Guest",
     employeeId: null,
+    actorId: 0,
     businessId: null,
     businessName: null,
   };
