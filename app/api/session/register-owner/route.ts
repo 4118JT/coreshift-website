@@ -8,6 +8,7 @@ import {
   verifyPassword,
 } from "../../../../db/app-auth";
 import { database, ensureDatabase } from "../../../../db/runtime";
+import { recordAudit } from "../../../../db/security";
 
 export async function POST(request: Request) {
   const body = await request.json() as {
@@ -88,6 +89,7 @@ export async function POST(request: Request) {
         partialOwner.businessId,
       ),
     ]);
+    await recordAudit({ businessId, actorType: "owner", actorId: ownerId, action: "business.registered", targetType: "business", targetId: businessId, request });
   }
 
   try {
@@ -136,7 +138,7 @@ export async function POST(request: Request) {
       {
         status: 201,
         headers: {
-          "set-cookie": `hourmark_session=${session.token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`,
+          "set-cookie": `hourmark_session=${session.token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`,
         },
       },
     );

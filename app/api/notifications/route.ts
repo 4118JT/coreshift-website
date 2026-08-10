@@ -27,8 +27,13 @@ export async function GET() {
   `).bind(...scheduleArgs).first<{ publishedAt: number }>();
   if (schedule?.publishedAt) notifications.push({ id: `schedule:${schedule.publishedAt}`, type: "schedule", title: "Schedule published", body: "Your latest schedule is ready to view.", createdAt: schedule.publishedAt });
 
-  const messages = await db.prepare(`SELECT id, sender_name AS senderName, body, created_at AS createdAt FROM messages WHERE business_id = ? ORDER BY created_at DESC, id DESC LIMIT 20`).bind(viewer.businessId).all<{ id: number; senderName: string; body: string; createdAt: number }>();
-  for (const message of messages.results) notifications.push({ id: `message:${message.id}`, type: "message", title: `Message from ${message.senderName}`, body: message.body, createdAt: message.createdAt });
+  const viewerType = viewer.access === "employee" ? "employee" : "owner";
+  const viewerId = viewer.actorId;
+  const messages = await db.prepare(`SELECT id, sender_type AS senderType, sender_id AS senderId, sender_name AS senderName, body, created_at AS createdAt FROM messages WHERE business_id = ? ORDER BY created_at DESC, id DESC LIMIT 20`).bind(viewer.businessId).all<{ id: number; senderType: string; senderId: number; senderName: string; body: string; createdAt: number }>();
+  for (const message of messages.results) {
+    if (message.senderType === viewerType && message.senderId === viewerId) continue;
+    notifications.push({ id: `message:${message.id}`, type: "message", title: `Message from ${message.senderName}`, body: message.body || "Sent a photo.", createdAt: message.createdAt });
+  }
   notifications.sort((left, right) => right.createdAt - left.createdAt);
   return Response.json({ notifications: notifications.slice(0, 30) }, { headers: { "cache-control": "no-store" } });
 }

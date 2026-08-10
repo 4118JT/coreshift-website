@@ -129,6 +129,8 @@ export function ensureDatabase() {
         user_type TEXT NOT NULL,
         user_id INTEGER NOT NULL DEFAULT 0,
         user_name TEXT NOT NULL,
+        conversation_id TEXT,
+        typing_until INTEGER NOT NULL DEFAULT 0,
         last_seen INTEGER NOT NULL,
         PRIMARY KEY (business_id, user_type, user_id)
       )`),
@@ -160,6 +162,8 @@ export function ensureDatabase() {
       "ALTER TABLE messages ADD COLUMN reply_to_id INTEGER REFERENCES messages(id)",
       "ALTER TABLE messages ADD COLUMN image_data TEXT",
       "ALTER TABLE messages ADD COLUMN image_name TEXT",
+      "ALTER TABLE message_presence ADD COLUMN conversation_id TEXT",
+      "ALTER TABLE message_presence ADD COLUMN typing_until INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE employees ADD COLUMN display_name TEXT",
       "ALTER TABLE employees ADD COLUMN availability TEXT",
       "ALTER TABLE employees ADD COLUMN desired_hours INTEGER NOT NULL DEFAULT 0",

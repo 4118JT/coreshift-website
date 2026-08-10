@@ -1,11 +1,14 @@
 import { database, ensureDatabase } from "../../../../db/runtime";
 import { getViewer } from "../../../../db/viewer";
+import { enforceRateLimit, rateLimitResponse, recordAudit } from "../../../../db/security";
 
 type PayrollPayment = { employeeId?: number; amountCents?: number };
 
 export async function POST(request: Request) {
   const viewer = await getViewer();
   if (viewer.access !== "owner") return Response.json({ error: "Owner access required" }, { status: 403 });
+  const limit = await enforceRateLimit(request, "payroll-manual-payment", viewer.businessId, 10, 15 * 60 * 1000);
+  if (!limit.allowed) return rateLimitResponse(limit.retryAfter);
   const body = await request.json() as { payments?: PayrollPayment[]; paidAt?: number; periodStart?: number; periodEnd?: number };
   const paidAt = Number(body.paidAt);
   const periodStart = Number(body.periodStart);
@@ -31,12 +34,15 @@ export async function POST(request: Request) {
     recorded.push({ employeeId, amountCents: remainingCents });
   }
   if (inserts.length) await db.batch(inserts);
+  await recordAudit({ businessId: viewer.businessId, actorType: "owner", actorId: viewer.actorId, action: "payroll.manual_payments_recorded", targetType: "pay_period", targetId: `${periodStart}:${periodEnd}`, metadata: { employeeCount: recorded.length, amountCents: recorded.reduce((sum, item) => sum + item.amountCents, 0) }, request });
   return Response.json({ recorded });
 }
 
 export async function DELETE(request: Request) {
   const viewer = await getViewer();
   if (viewer.access !== "owner") return Response.json({ error: "Owner access required" }, { status: 403 });
+  const limit = await enforceRateLimit(request, "payroll-manual-payment-reversal", viewer.businessId, 10, 15 * 60 * 1000);
+  if (!limit.allowed) return rateLimitResponse(limit.retryAfter);
   const body = await request.json() as { employeeIds?: number[]; periodStart?: number; periodEnd?: number };
   const periodStart = Number(body.periodStart);
   const periodEnd = Number(body.periodEnd);
@@ -56,5 +62,6 @@ export async function DELETE(request: Request) {
       .bind(employeeId, periodStart, periodEnd, viewer.businessId).run();
     if (Number(result.meta?.changes ?? 0) > 0) removed.push(employeeId);
   }
+  await recordAudit({ businessId: viewer.businessId, actorType: "owner", actorId: viewer.actorId, action: "payroll.manual_payments_reversed", targetType: "pay_period", targetId: `${periodStart}:${periodEnd}`, metadata: { employeeCount: removed.length }, request });
   return Response.json({ removed });
 }

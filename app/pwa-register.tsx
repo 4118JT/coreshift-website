@@ -9,7 +9,7 @@ export function PwaRegister() {
       // immediately on phones that have installed CoreShift as a PWA.
       navigator.serviceWorker.getRegistrations()
         .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
-        .then(() => navigator.serviceWorker.register("/sw.js?v=3"))
+        .then(() => navigator.serviceWorker.register("/sw.js?v=4"))
         .catch(() => undefined);
     }
   }, []);

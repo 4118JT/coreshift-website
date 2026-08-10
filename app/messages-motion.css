@@ -103,3 +103,12 @@ html[data-theme="dark"] .reference-message-list .message-bubble.mine .message-re
 .message-full-date{display:block;margin:5px 7px 0;color:#8a93a4;font-size:8px;font-weight:650;line-height:1.25;text-align:left;letter-spacing:.01em}
 .message-bubble.mine .message-full-date{text-align:right}
 .message-bubble.grouped .message-full-date{margin-top:4px}
+.conversation-head small.typing-status{color:#5b47d1;font-weight:780}
+.message-typing-indicator{display:grid;grid-template-columns:auto auto 1fr;align-items:end;gap:10px;margin:10px 0 2px;animation:message-in .18s ease both}
+.message-typing-indicator .message-sender-avatar{display:grid;place-items:center;overflow:hidden}
+.message-typing-bubble{display:inline-flex;align-items:center;gap:5px;min-height:42px;padding:0 14px;border:1px solid #dedff1;border-radius:16px 16px 16px 6px;background:#fff;box-shadow:0 6px 18px rgba(36,43,70,.08)}
+.message-typing-bubble span{width:8px;height:8px;border-radius:50%;background:#8a84b7;animation:typing-dot 1s ease-in-out infinite}
+.message-typing-bubble span:nth-child(2){animation-delay:.14s}
+.message-typing-bubble span:nth-child(3){animation-delay:.28s}
+.message-typing-indicator small{color:#7a8396;font-size:10px;font-weight:700;line-height:1.3}
+@keyframes typing-dot{0%,80%,100%{transform:translateY(0);opacity:.38}40%{transform:translateY(-4px);opacity:1}}

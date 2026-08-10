@@ -1,12 +1,15 @@
 import { env } from "cloudflare:workers";
 import { hashCredential, hashPassword, verifyCredential } from "../../../../db/app-auth";
 import { database, ensureDatabase } from "../../../../db/runtime";
+import { enforceRateLimit, rateLimitResponse, recordAudit } from "../../../../db/security";
 
 function json(body: unknown, status: number) {
   return Response.json(body, { status, headers: { "cache-control": "no-store" } });
 }
 
 export async function POST(request: Request) {
+  const limit = await enforceRateLimit(request, "owner-recovery", "all", 5, 15 * 60 * 1000);
+  if (!limit.allowed) return rateLimitResponse(limit.retryAfter);
   const body = await request.json().catch(() => null) as {
     email?: string;
     recoveryCode?: string;
@@ -53,8 +56,11 @@ export async function POST(request: Request) {
     : null;
 
   if (!tokenMatches || !owner || alreadyUsed) {
+    await recordAudit({ actorType: "anonymous", action: "owner.recovery", outcome: "denied", request });
     return json({ error: "That recovery code is invalid or has already been used." }, 401);
   }
+
+  await recordAudit({ actorType: "owner", actorId: owner.id, action: "owner.recovery", targetType: "owner", targetId: owner.id, request });
 
   try {
     await database().batch([

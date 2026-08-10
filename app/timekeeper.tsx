@@ -97,6 +97,7 @@ type PaymentDetail = {
   note: string | null;
 };
 type AppNotification = { id: string; type: "payment" | "schedule" | "message"; title: string; body: string; createdAt: number };
+type PhoneNotificationPermission = NotificationPermission | "unsupported";
 
 type ScheduledPayment = {
   id: number;
@@ -469,6 +470,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   // Keep the overview data path explicit so the server render and client render use the same inputs.
   const isEmployee = viewer.access === "employee";
   const isDemo = viewer.businessId === "__coreshift_demo__";
+  const phoneNotificationKey = `coreshift-phone-notifications:${viewer.businessId}:${viewer.actorId}`;
   const [employees, setEmployees] = useState(isEmployee ? [] : fallbackEmployees);
   const [now, setNow] = useState(new Date());
   const [showAll, setShowAll] = useState(false);
@@ -483,6 +485,8 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [unreadMessages, setUnreadMessages] = useState(0);
+  const [phoneNotificationsEnabled, setPhoneNotificationsEnabled] = useState(false);
+  const [phoneNotificationPermission, setPhoneNotificationPermission] = useState<PhoneNotificationPermission>("unsupported");
   const [darkMode, setDarkMode] = useState(false);
   const [messagingAllowed, setMessagingAllowed] = useState(true);
   const [employeeControls, setEmployeeControls] = useState<Record<string, boolean> | null>(null);
@@ -490,6 +494,8 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const [clockEditError, setClockEditError] = useState("");
   const [approved, setApproved] = useState<number[]>([]);
   const [scheduleNewShiftTick, setScheduleNewShiftTick] = useState(0);
+  const knownNotificationIdsRef = useRef(new Set<string>());
+  const loadedNotificationsRef = useRef(false);
   const working = useMemo(() => employees.filter((person) => person.status === "clocked_in"), [employees]);
   // Keep the employee clock usable during the brief API load (and on slower
   // mobile connections) by using the signed-in employee identity immediately.
@@ -508,6 +514,42 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     hourlyRateCents: 0,
   }) : undefined;
   const viewerRole = isEmployee ? (employees.find((person) => person.id === viewer.employeeId)?.role || "Employee") : "Owner";
+  const phoneNotificationsAvailable = phoneNotificationPermission !== "unsupported";
+  const phoneNotificationsReady = phoneNotificationsEnabled && phoneNotificationPermission === "granted";
+  async function showPhoneNotification(notification: AppNotification) {
+    if (!phoneNotificationsReady) return;
+    const href = notification.type === "message" ? "/messages" : notification.type === "schedule" ? (isEmployee ? "/my-schedule" : "/schedule") : isEmployee ? "/profile" : "/payroll";
+    if ("serviceWorker" in navigator) {
+      const registration = await navigator.serviceWorker.ready.catch(() => null);
+      if (registration) {
+        await registration.showNotification(notification.title, {
+          body: notification.body || "Open CoreShift to view the latest update.",
+          icon: "/icon-192.png",
+          badge: "/icon-192.png",
+          tag: notification.id,
+          renotify: false,
+          data: { href },
+        }).catch(() => undefined);
+        return;
+      }
+    }
+    if ("Notification" in window) new Notification(notification.title, { body: notification.body || "Open CoreShift to view the latest update.", icon: "/icon-192.png", tag: notification.id });
+  }
+  async function enablePhoneNotifications() {
+    if (!phoneNotificationsAvailable) { flash("Phone notifications are not available on this device."); return; }
+    if (phoneNotificationPermission === "denied") { flash("Phone notifications are blocked in your browser settings."); return; }
+    const permission = phoneNotificationPermission === "granted" ? "granted" : await Notification.requestPermission().catch(() => "denied" as NotificationPermission);
+    setPhoneNotificationPermission(permission);
+    if (permission !== "granted") { flash("Phone notifications were not enabled."); return; }
+    window.localStorage.setItem(phoneNotificationKey, "true");
+    setPhoneNotificationsEnabled(true);
+    flash("Phone notifications are on for new messages.");
+  }
+  function disablePhoneNotifications() {
+    window.localStorage.setItem(phoneNotificationKey, "false");
+    setPhoneNotificationsEnabled(false);
+    flash("Phone notifications are off.");
+  }
   useEffect(() => {
     if (!isEmployee) return;
     const apply = (byRole: Record<string, Record<string, boolean>>) => { const matchedRole = Object.keys(byRole).find((key) => key.trim().toLowerCase() === viewerRole.trim().toLowerCase()); const permissions = matchedRole ? byRole[matchedRole] : undefined; if (!permissions) { setEmployeeControls(null); setMessagingAllowed(false); return; } setEmployeeControls(permissions); setMessagingAllowed(permissions["View messages"] === true || permissions["Send direct messages"] === true || permissions["Create group messages"] === true); };
@@ -521,6 +563,8 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     const initialDark = savedTheme === "dark";
     setDarkMode(initialDark);
     document.documentElement.dataset.theme = initialDark ? "dark" : "light";
+    setPhoneNotificationsEnabled(window.localStorage.getItem(phoneNotificationKey) === "true");
+    setPhoneNotificationPermission("Notification" in window ? Notification.permission : "unsupported");
     const savedFontSize = window.localStorage.getItem("coreshift-font-size") as AppFontSize | null;
     if (savedFontSize && ["standard", "large", "larger", "largest"].includes(savedFontSize)) applyAppFontSize(savedFontSize);
     window.setTimeout(() => applyAppFontSize((window.localStorage.getItem("coreshift-font-size") as AppFontSize) || "large"), 0);
@@ -528,16 +572,30 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     refreshEmployees();
     if (!isEmployee) fetch("/api/settings/employee-join-code").then((response) => response.ok ? response.json() as Promise<{ code: string | null }> : Promise.reject()).then((result) => setEmployeeJoinCode(result.code)).catch(() => {});
+    loadedNotificationsRef.current = false;
+    knownNotificationIdsRef.current = new Set();
     const loadNotifications = async () => {
       const response = await fetch("/api/notifications").catch(() => null);
       if (!response?.ok) return;
       const result = await response.json().catch(() => null) as { notifications?: AppNotification[] } | null;
       const preferences = viewer.access === "employee" ? JSON.parse(window.localStorage.getItem("coreshift-employee-notifications") || "{}") as { schedule?: boolean; reminders?: boolean; messages?: boolean; payments?: boolean } : {};
       const visible = (result?.notifications ?? []).filter((item) => item.type === "schedule" ? preferences.schedule !== false : item.type === "message" ? preferences.messages !== false : preferences.payments !== false);
+      const newNotifications = visible.filter((item) => !knownNotificationIdsRef.current.has(item.id));
+      knownNotificationIdsRef.current = new Set(visible.map((item) => item.id));
       setNotifications(visible);
       const seenKey = `coreshift-notifications-seen:${viewer.employeeId ?? "owner"}`;
       const seen = Number(window.localStorage.getItem(seenKey) || 0);
       setUnreadNotifications(visible.filter((item) => item.createdAt > seen).length);
+      if (!loadedNotificationsRef.current) {
+        loadedNotificationsRef.current = true;
+        return;
+      }
+      if (!phoneNotificationsReady) return;
+      for (const notification of newNotifications) {
+        if (notification.type !== "message") continue;
+        if (document.visibilityState === "visible" && view === "messages") continue;
+        await showPhoneNotification(notification);
+      }
     };
     loadNotifications();
     const notificationTimer = window.setInterval(loadNotifications, 20000);
@@ -547,7 +605,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
       window.clearInterval(notificationTimer);
       window.clearInterval(dataTimer);
     };
-  }, [viewer.access, viewer.employeeId]);
+  }, [isEmployee, phoneNotificationKey, phoneNotificationsReady, view, viewer.access, viewer.employeeId]);
 
   useEffect(() => {
     if (!messagingAllowed || isDemo) { setUnreadMessages(0); return; }
@@ -798,7 +856,17 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
             {view === "overview" && <div className="live-time"><span>{formatClockTime(now)}</span><small>Local time</small></div>}
             {view === "team" && <button className="primary-button page-action" disabled={isDemo} onClick={() => setShowAddEmployee(true)}><span>＋</span>Add employee</button>}
             {view === "schedule" && <button className="primary-button page-action" disabled={isDemo} onClick={() => setScheduleNewShiftTick((value) => value + 1)}><span>＋</span>Add shift</button>}
-            {view === "messages" && <button className="primary-button page-action" onClick={() => window.dispatchEvent(new Event("coreshift:new-message"))}><span>✎</span>New message</button>}
+            {view === "messages" && <div className="page-actions-inline page-action">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={phoneNotificationsReady ? disablePhoneNotifications : () => void enablePhoneNotifications()}
+                disabled={!phoneNotificationsAvailable}
+              >
+                {phoneNotificationsReady ? "Phone alerts on" : phoneNotificationPermission === "denied" ? "Phone alerts blocked" : "Enable phone alerts"}
+              </button>
+              <button className="primary-button" onClick={() => window.dispatchEvent(new Event("coreshift:new-message"))}><span>✎</span>New message</button>
+            </div>}
           </section>
           {isDemo && <div className="demo-mode-banner"><strong>Demo mode</strong><span>Sample data only. Nothing you do here is saved or sent anywhere.</span></div>}
 
@@ -2530,6 +2598,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const [reactionMessageId, setReactionMessageId] = useState<number | null>(null);
   const [replyingTo, setReplyingTo] = useState<WorkspaceMessage | null>(null);
   const [onlinePeople, setOnlinePeople] = useState<Array<{ userType: "owner" | "employee"; userId: number; userName: string; lastSeen: number }>>([]);
+  const [typingPeople, setTypingPeople] = useState<Array<{ userType: "owner" | "employee"; userId: number; userName: string; lastSeen: number }>>([]);
   const reactionHoldRef = useRef<{ timer: number; x: number; y: number } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -2537,7 +2606,24 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const activeConversationRef = useRef(activeConversation);
   const hydratedConversationsRef = useRef(new Set<string>());
   const messageLoadsInFlightRef = useRef(new Set<string>());
+  const typingTimeoutRef = useRef<number | null>(null);
+  const typingConversationRef = useRef<string | null>(null);
+  const typingActiveRef = useRef(false);
   activeConversationRef.current = activeConversation;
+  function sendTypingState(conversationId: string, typing: boolean) {
+    fetch("/api/messages", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "typing", conversationId, typing }) }).catch(() => undefined);
+  }
+  function stopTyping(conversationId = typingConversationRef.current) {
+    if (typingTimeoutRef.current) {
+      window.clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+    if (!conversationId) return;
+    const shouldNotify = typingActiveRef.current && typingConversationRef.current === conversationId;
+    typingActiveRef.current = false;
+    typingConversationRef.current = null;
+    if (shouldNotify) sendTypingState(conversationId, false);
+  }
   function archiveConversation(conversationId: string) {
     setConversations((current) => current.map((conversation) => conversation.id === conversationId ? { ...conversation, archived: true } : conversation));
     if (activeConversation === conversationId) {
@@ -2627,7 +2713,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   }
   async function loadMessages() {
     const conversationId = activeConversationRef.current;
-    if (!conversationId) { setMessages([]); setLoading(false); return; }
+    if (!conversationId) { setMessages([]); setTypingPeople([]); setLoading(false); return; }
     if (messageLoadsInFlightRef.current.has(conversationId)) return;
     messageLoadsInFlightRef.current.add(conversationId);
     if (!hydratedConversationsRef.current.has(conversationId)) {
@@ -2638,10 +2724,10 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
       } catch { /* use the server copy */ }
     }
     const response = await fetch(`/api/messages?conversationId=${encodeURIComponent(conversationId)}&refresh=${Date.now()}`, { cache: "no-store" }).catch(() => null);
-    const result = response ? await response.json().catch(() => null) as { enabled?: boolean; messages?: WorkspaceMessage[] } | null : null;
+    const result = response ? await response.json().catch(() => null) as { enabled?: boolean; messages?: WorkspaceMessage[]; typingPeople?: Array<{ userType: "owner" | "employee"; userId: number; userName: string; lastSeen: number }> } | null : null;
     if (!response?.ok) { messageLoadsInFlightRef.current.delete(conversationId); setError("Messages could not be loaded."); return; }
     if (activeConversationRef.current !== conversationId) { messageLoadsInFlightRef.current.delete(conversationId); return; }
-    setEnabled(result?.enabled !== false); setMessages(result?.messages ?? []); setLoading(false);
+    setEnabled(result?.enabled !== false); setMessages(result?.messages ?? []); setTypingPeople(result?.typingPeople ?? []); setLoading(false);
     const latest = result?.messages?.at(-1);
     if (latest) {
       setConversations((current) => current.map((conversation) => conversation.id === conversationId ? { ...conversation, preview: messagePreview(latest, viewer.access), lastMessageAt: latest.createdAt, unread: false } : conversation));
@@ -2681,15 +2767,32 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     const idle = requestIdle ? requestIdle(start, { timeout: 1200 }) : window.setTimeout(start, 800);
     return () => { if (typeof idle === "number") window.clearTimeout(idle); };
   }, [conversations.length]);
-  useEffect(() => { if (listRef.current) listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [messages.length]);
+  useEffect(() => { if (listRef.current) listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [messages.length, typingPeople.length]);
   useEffect(() => { const openComposer = () => { setComposeMode("direct"); setComposeOpen(true); }; window.addEventListener("coreshift:new-message", openComposer); return () => window.removeEventListener("coreshift:new-message", openComposer); }, []);
   useEffect(() => {
+    stopTyping();
+    setTypingPeople([]);
     setMessages([]);
     setReplyingTo(null);
     setImageData(null);
     setImageName("");
     loadMessages();
   }, [activeConversation]);
+  useEffect(() => () => stopTyping(), []);
+  useEffect(() => {
+    if (!enabled || !activeConversation) { stopTyping(); return; }
+    if (!body.trim()) { stopTyping(); return; }
+    if (!typingActiveRef.current || typingConversationRef.current !== activeConversation) {
+      if (typingConversationRef.current && typingConversationRef.current !== activeConversation) stopTyping(typingConversationRef.current);
+      sendTypingState(activeConversation, true);
+      typingConversationRef.current = activeConversation;
+      typingActiveRef.current = true;
+    }
+    if (typingTimeoutRef.current) window.clearTimeout(typingTimeoutRef.current);
+    typingTimeoutRef.current = window.setTimeout(() => {
+      if (typingConversationRef.current === activeConversationRef.current) stopTyping(activeConversationRef.current);
+    }, 1600);
+  }, [activeConversation, body, enabled]);
   useEffect(() => {
     const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>(".conversation-tabs button"));
     const items = Array.from(document.querySelectorAll<HTMLElement>(".conversation-item"));
@@ -2717,7 +2820,9 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, imageData, imageName, conversationId: activeConversation, replyToId: replyingTo?.id }) }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as WorkspaceMessage & { error?: string } | null : null;
     setBusy(false); if (!response?.ok) { setError(result?.error ?? "Message could not be sent."); return; }
-    if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); } setBody(""); setImageData(null); setImageName(""); setReplyingTo(null);
+    if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); }
+    stopTyping(activeConversation);
+    setBody(""); setImageData(null); setImageName(""); setReplyingTo(null);
   }
   function beginReactionHold(event: React.PointerEvent<HTMLDivElement>, messageId: number) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
@@ -2795,8 +2900,9 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     if (lastSeen.toDateString() === yesterday.toDateString()) return `Last seen yesterday at ${lastSeen.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
     return `Last seen ${lastSeen.toLocaleDateString([], { month: "short", day: "numeric" })}`;
   };
+  const typingSummary = typingPeople.length === 0 ? "" : typingPeople.length === 1 ? `${typingPeople[0].userName} is typing...` : typingPeople.length === 2 ? `${typingPeople[0].userName} and ${typingPeople[1].userName} are typing...` : `${typingPeople.length} people are typing...`;
   const createConversation = (event: FormEvent) => { event.preventDefault(); const name = composeMode === "group" ? composeName.trim() : employees.find((employee) => employee.id === composeMembers[0])?.name; if (!name || (composeMode === "group" && composeMembers.length < 2)) return; const conversation = { id: composeMode === "direct" ? `direct-${composeMembers[0]}` : `group-${Date.now()}`, name, kind: composeMode, memberCount: composeMode === "group" ? composeMembers.length + 1 : 2, unread: false }; setConversations((current) => (current.some((item) => item.id === conversation.id) ? current : [...current, conversation]).sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name))); setActiveConversation(conversation.id); setMessages([]); setComposeOpen(false); setComposeName(""); setComposeMembers([]); };
-  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className={`conversation-avatar ${isConversationOnline(conversation) ? "online" : ""}`}>{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p>{conversation.kind === "direct" && <small className="conversation-presence-label">{conversationPresenceText(conversation)}</small>}</div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className={`conversation-avatar large ${isConversationOnline(active) ? "online" : ""}`}>{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small>{active?.kind === "group" ? `Group conversation · ${messages.length || employees.length} members` : active ? conversationPresenceText(active) : "Swipe right on a conversation to archive it"}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message, index) => { const previousMessage = messages[index - 1]; const grouped = Boolean(previousMessage && previousMessage.senderType === message.senderType && previousMessage.senderId === message.senderId); const readNames = [...new Set((message.readBy ?? []).map((receipt) => receipt.readerName))]; return <div className={`message-bubble ${message.sentByViewer ? "mine" : ""} ${grouped ? "grouped" : ""}`} key={message.id} onPointerDown={(event) => beginReactionHold(event, message.id)} onPointerMove={moveReactionHold} onPointerUp={endReactionHold} onPointerCancel={endReactionHold} onPointerLeave={endReactionHold} onContextMenu={(event) => { event.preventDefault(); setReactionMessageId(message.id); }} title="Press and hold for message options">{!grouped && <div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}</div>}{message.replyTo && <div className="message-reply-quote"><strong>Replying to {message.replyTo.senderName}</strong><span>{message.replyTo.body}</span></div>}{message.imageData && <a className="message-photo-link" href={message.imageData} target="_blank" rel="noreferrer" onPointerDown={(event) => event.stopPropagation()}><img className="message-photo" src={message.imageData} alt={message.imageName || "Shared photo"} /></a>}{message.body && <p>{message.body}</p>}<time className="message-full-date">{new Date(message.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</time>{Boolean(message.reactions?.length) && <div className="message-reaction-row">{message.reactions?.map((reaction) => <button className={reaction.reactedByViewer ? "mine" : ""} type="button" key={reaction.emoji} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); toggleReaction(message.id, reaction.emoji); }} aria-label={`${reaction.emoji} reaction, ${reaction.count}`}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div>}{reactionMessageId === message.id && <div className="message-reaction-picker" role="menu" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="message-reply-action" type="button" role="menuitem" onClick={() => startReply(message)} aria-label="Reply to message">Reply</button>{MESSAGE_REACTIONS.map((emoji) => <button type="button" role="menuitem" key={emoji} onClick={() => toggleReaction(message.id, emoji)} aria-label={`React with ${emoji}`}>{emoji}</button>)}</div>}{message.sentByViewer && <span className={`message-read-receipt ${readNames.length ? "read" : ""}`}>{readNames.length ? `✓✓ Read by ${readNames.length > 2 ? `${readNames.length} people` : readNames.join(", ")}` : "✓ Sent"}</span>}</div>; })}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><div className="message-attachment-controls"><input ref={photoInputRef} className="message-photo-input" type="file" accept="image/*" onChange={chooseMessagePhoto} /><button className="message-photo-button" type="button" onClick={() => photoInputRef.current?.click()}>Photo</button></div>{replyingTo && <div className="message-composer-reply"><strong>Replying to {replyingTo.senderName}</strong><span>{replyingTo.body}</span><button type="button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply">x</button></div>}{imageData && <div className="message-photo-preview"><img src={imageData} alt={imageName || "Photo ready to send"} /><button type="button" onClick={() => { setImageData(null); setImageName(""); }} aria-label="Remove photo">x</button></div>}<textarea ref={composerRef} value={body} onChange={(event) => setBody(event.target.value)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || (!body.trim() && !imageData)}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
+  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className={`conversation-avatar ${isConversationOnline(conversation) ? "online" : ""}`}>{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p>{conversation.kind === "direct" && <small className="conversation-presence-label">{conversationPresenceText(conversation)}</small>}</div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className={`conversation-avatar large ${isConversationOnline(active) ? "online" : ""}`}>{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small className={typingSummary ? "typing-status" : undefined}>{typingSummary || (active?.kind === "group" ? `Group conversation - ${messages.length || employees.length} members` : active ? conversationPresenceText(active) : "Swipe right on a conversation to archive it")}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message, index) => { const previousMessage = messages[index - 1]; const grouped = Boolean(previousMessage && previousMessage.senderType === message.senderType && previousMessage.senderId === message.senderId); const readNames = [...new Set((message.readBy ?? []).map((receipt) => receipt.readerName))]; return <div className={`message-bubble ${message.sentByViewer ? "mine" : ""} ${grouped ? "grouped" : ""}`} key={message.id} onPointerDown={(event) => beginReactionHold(event, message.id)} onPointerMove={moveReactionHold} onPointerUp={endReactionHold} onPointerCancel={endReactionHold} onPointerLeave={endReactionHold} onContextMenu={(event) => { event.preventDefault(); setReactionMessageId(message.id); }} title="Press and hold for message options">{!grouped && <div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}</div>}{message.replyTo && <div className="message-reply-quote"><strong>Replying to {message.replyTo.senderName}</strong><span>{message.replyTo.body}</span></div>}{message.imageData && <a className="message-photo-link" href={message.imageData} target="_blank" rel="noreferrer" onPointerDown={(event) => event.stopPropagation()}><img className="message-photo" src={message.imageData} alt={message.imageName || "Shared photo"} /></a>}{message.body && <p>{message.body}</p>}<time className="message-full-date">{new Date(message.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</time>{Boolean(message.reactions?.length) && <div className="message-reaction-row">{message.reactions?.map((reaction) => <button className={reaction.reactedByViewer ? "mine" : ""} type="button" key={reaction.emoji} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); toggleReaction(message.id, reaction.emoji); }} aria-label={`${reaction.emoji} reaction, ${reaction.count}`}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div>}{reactionMessageId === message.id && <div className="message-reaction-picker" role="menu" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="message-reply-action" type="button" role="menuitem" onClick={() => startReply(message)} aria-label="Reply to message">Reply</button>{MESSAGE_REACTIONS.map((emoji) => <button type="button" role="menuitem" key={emoji} onClick={() => toggleReaction(message.id, emoji)} aria-label={`React with ${emoji}`}>{emoji}</button>)}</div>}{message.sentByViewer && <span className={`message-read-receipt ${readNames.length ? "read" : ""}`}>{readNames.length ? `✓✓ Read by ${readNames.length > 2 ? `${readNames.length} people` : readNames.join(", ")}` : "✓ Sent"}</span>}</div>; })}{typingSummary && active && <div className="message-typing-indicator" aria-live="polite" aria-label={typingSummary}><span className="message-sender-avatar">{conversationAvatar(active)}</span><div className="message-typing-bubble" aria-hidden="true"><span /><span /><span /></div><small>{typingSummary}</small></div>}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><div className="message-attachment-controls"><input ref={photoInputRef} className="message-photo-input" type="file" accept="image/*" onChange={chooseMessagePhoto} /><button className="message-photo-button" type="button" onClick={() => photoInputRef.current?.click()}>Photo</button></div>{replyingTo && <div className="message-composer-reply"><strong>Replying to {replyingTo.senderName}</strong><span>{replyingTo.body}</span><button type="button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply">x</button></div>}{imageData && <div className="message-photo-preview"><img src={imageData} alt={imageName || "Photo ready to send"} /><button type="button" onClick={() => { setImageData(null); setImageName(""); }} aria-label="Remove photo">x</button></div>}<textarea ref={composerRef} value={body} onChange={(event) => setBody(event.target.value)} onBlur={() => stopTyping(activeConversation)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || (!body.trim() && !imageData)}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
 }
 
 function AiAssistant({ viewer }: { viewer: Viewer }) {
@@ -3364,12 +3470,12 @@ type IntegrationState = { status: "not_connected" | "setup_requested"; syncEmplo
 type SecurityState = { loginAlerts: boolean; requireTwoFactor: boolean; rememberDevices: boolean; restrictUnknownDevices: boolean; sessionTimeoutMinutes: number };
 
 const settingsNavItems: [SettingsSection, string, string, string][] = [
-  ["general", "Organization", "Company profile and details", "OR"], ["billing", "Billing & Subscription", "Manage your plan and billing", "BI"],
-  ["locations", "Locations", "Manage your locations", "LO"], ["access", "Roles & Permissions", "Control access and permissions", "RO"],
-  ["time", "Time & Attendance", "Rules and time tracking", "TI"], ["scheduling", "Scheduling", "Scheduling preferences", "SC"],
-  ["pay", "Pay & Overtime", "Pay rates and overtime rules", "PA"], ["notifications", "Notifications", "Notification preferences", "NO"],
-  ["integrations", "Integrations", "Connected apps and services", "IN"], ["owners", "Account", "Your account settings", "AC"],
-  ["security", "Security", "Password and security", "SE"],
+  ["general", "Company", "Profile and workspace defaults", "CO"], ["billing", "Billing", "Plan, invoices, and payment", "BI"],
+  ["locations", "Locations", "Worksites and time zones", "LO"], ["access", "Roles & access", "Who can see and change data", "RO"],
+  ["time", "Time tracking", "Clock, break, and rounding rules", "TI"], ["scheduling", "Scheduling", "Shift and availability rules", "SC"],
+  ["pay", "Pay rules", "Pay periods and overtime", "PA"], ["notifications", "Alerts", "Email, push, and reminders", "AL"],
+  ["integrations", "Connected apps", "Gusto, Google, and more", "IN"], ["owners", "My account", "Owners and personal access", "AC"],
+  ["security", "Security", "Sessions and workspace protection", "SE"],
 ];
 
 function SettingsSectionNav({ active, onNavigate }: { active: SettingsSection; onNavigate: (section: SettingsSection) => void }) {
@@ -3409,20 +3515,22 @@ function IntegrationsSettingsPage({ flash, onNavigate }: { flash: (message: stri
   return <div className="settings-reference settings-feature-page"><SettingsSectionNav active="integrations" onNavigate={onNavigate} /><main className="settings-reference-main"><header className="settings-feature-head"><div><p className="eyebrow">CONNECTED TOOLS</p><h1>Integrations</h1><p>Prepare the services CoreShift can exchange data with. Provider authorization is completed separately.</p></div></header><div className="settings-integration-note"><strong>Connections stay honest</strong><span>Requesting setup does not mark a provider connected. OAuth credentials and provider approval are still required.</span></div><section className="settings-integration-grid">{providers.map((provider) => { const state = integrations[provider.id] || defaults[provider.id]; const requested = state.status === "setup_requested"; return <article className="settings-integration-card" key={provider.id}><div className="integration-card-head"><span>{provider.badge}</span><div><h3>{provider.name}</h3><em className={requested ? "requested" : ""}>{requested ? "Setup requested" : "Not connected"}</em></div></div><p>{provider.description}</p><label><input type="checkbox" checked={state.syncEmployees} disabled={!requested} onChange={(event) => void update(provider.id, { ...state, syncEmployees: event.target.checked }, "Employee sync preference saved.")} /> Prepare employee data</label><label><input type="checkbox" checked={state.syncTime} disabled={!requested} onChange={(event) => void update(provider.id, { ...state, syncTime: event.target.checked }, "Time sync preference saved.")} /> Prepare approved time</label><button className={requested ? "secondary-button" : "primary-button"} type="button" disabled={loading || savingId === provider.id} onClick={() => void update(provider.id, { ...state, status: requested ? "not_connected" : "setup_requested" }, requested ? "Integration setup request canceled." : "Integration setup request saved.")}>{savingId === provider.id ? "Saving..." : requested ? "Cancel request" : "Request setup"}</button></article>; })}</section></main></div>;
 }
 
-type LiveIntegrationStatus = { id: string; configured: boolean; missing: string[]; connected: boolean; accountName: string | null; accountId: string | null; connectedAt: number | null; callbackUrl: string };
+type LiveIntegrationStatus = { id: string; configured: boolean; missing: string[]; connected: boolean; accountName: string | null; accountId: string | null; connectedAt: number | null; callbackUrl: string; environment?: "demo" | "production" | null };
 
 function LiveIntegrationsSettingsPage({ flash, onNavigate }: { flash: (message: string) => void; onNavigate: (section: SettingsSection) => void }) {
   const providers = [{ id: "quickbooks", badge: "QB", name: "QuickBooks Online", description: "Authorize a QuickBooks company and verify accounting API access." }, { id: "gusto", badge: "GU", name: "Gusto", description: "Authorize an approved Gusto Embedded Payroll company." }, { id: "googleCalendar", badge: "GC", name: "Google Calendar", description: "Authorize Calendar event access for published schedules." }, { id: "slack", badge: "SL", name: "Slack", description: "Authorize a Slack workspace for schedule and attendance messages." }];
   const [statuses, setStatuses] = useState<Record<string, LiveIntegrationStatus>>({});
   const [loading, setLoading] = useState(true);
   const [working, setWorking] = useState<string | null>(null);
+  const [gustoDemo, setGustoDemo] = useState({ companyId: "", companyName: "CoreShift", accessToken: "", refreshToken: "" });
   const load = () => fetch("/api/integrations/status", { cache: "no-store" }).then((response) => response.ok ? response.json() as Promise<{ providers: LiveIntegrationStatus[] }> : Promise.reject()).then((payload) => setStatuses(Object.fromEntries(payload.providers.map((item) => [item.id, item])))).catch(() => flash("Integration status could not be loaded.")).finally(() => setLoading(false));
   useEffect(() => { void load(); }, []);
   const connect = async (id: string) => { setWorking(id); const response = await fetch(`/api/integrations/${id}/connect`, { cache: "no-store" }).catch(() => null); const payload = response ? await response.json().catch(() => null) as { authorizationUrl?: string; error?: string; missing?: string[] } | null : null; if (!response?.ok || !payload?.authorizationUrl) { flash(payload?.missing?.length ? `Add these private environment variables: ${payload.missing.join(", ")}` : payload?.error || "The provider connection could not start."); setWorking(null); return; } window.location.assign(payload.authorizationUrl); };
   const disconnect = async (id: string) => { setWorking(id); const response = await fetch(`/api/integrations/${id}/disconnect`, { method: "DELETE" }).catch(() => null); if (!response?.ok) flash("The integration could not be disconnected."); else { flash("Integration disconnected."); await load(); } setWorking(null); };
   const test = async (id: string) => { setWorking(id); const response = await fetch(`/api/integrations/${id}/test`, { method: "POST" }).catch(() => null); const payload = response ? await response.json().catch(() => null) as { error?: string; accountName?: string } | null : null; flash(response?.ok ? `${payload?.accountName || "Provider"} connection verified.` : payload?.error || "Connection test failed."); setWorking(null); };
+  const connectGustoDemo = async () => { setWorking("gusto"); const response = await fetch("/api/gusto/connect-demo", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(gustoDemo) }).catch(() => null); const payload = response ? await response.json().catch(() => null) as { error?: string; companyName?: string } | null : null; if (!response?.ok) flash(payload?.error || "The Gusto demo company could not be connected."); else { setGustoDemo({ companyId: "", companyName: "CoreShift", accessToken: "", refreshToken: "" }); flash(`${payload?.companyName || "Gusto demo company"} connected securely.`); await load(); } setWorking(null); };
   const gustoFlow = async (flowType: "company_onboarding" | "employee_management" | "run_payroll" | "payroll_history") => { setWorking("gusto"); await openGustoFlow(flowType, flash); setWorking(null); };
-  return <div className="settings-reference settings-feature-page"><SettingsSectionNav active="integrations" onNavigate={onNavigate} /><main className="settings-reference-main"><header className="settings-feature-head"><div><p className="eyebrow">LIVE CONNECTIONS</p><h1>Integrations</h1><p>Authorize providers securely, verify access, and disconnect accounts from one place.</p></div></header><div className="settings-integration-note"><strong>Secure OAuth</strong><span>Provider passwords never pass through CoreShift. Access and refresh tokens are encrypted before storage and isolated by business.</span></div><section className="settings-integration-grid">{providers.map((provider) => { const status = statuses[provider.id]; const connected = status?.connected; const configured = status?.configured; return <article className="settings-integration-card live" key={provider.id}><div className="integration-card-head"><span>{provider.badge}</span><div><h3>{provider.name}</h3><em className={connected ? "connected" : configured ? "ready" : ""}>{loading ? "Checking" : connected ? "Connected" : configured ? "Ready to connect" : "Configuration needed"}</em></div></div><p>{provider.description}</p>{connected ? <div className="integration-account"><strong>{status.accountName || provider.name}</strong><span>Connected {status.connectedAt ? new Date(status.connectedAt).toLocaleDateString() : "recently"}</span></div> : <div className="integration-requirements"><strong>{configured ? "Provider app is configured" : "Private credentials required"}</strong><span>{configured ? "Continue to the provider consent screen." : status?.missing?.join(", ") || "Loading configuration..."}</span>{status?.callbackUrl && <small>Callback: {status.callbackUrl}</small>}</div>}<div className="integration-live-actions">{connected ? provider.id === "gusto" ? <><button className="primary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("company_onboarding")}>{working === provider.id ? "Opening..." : "Company setup"}</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("employee_management")}>Employees</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("run_payroll")}>Run payroll</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("payroll_history")}>History</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void test(provider.id)}>Test</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void disconnect(provider.id)}>Disconnect</button></> : <><button className="primary-button" type="button" disabled={working === provider.id} onClick={() => void test(provider.id)}>{working === provider.id ? "Checking..." : "Test connection"}</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void disconnect(provider.id)}>Disconnect</button></> : <button className="primary-button" type="button" disabled={loading || working === provider.id} onClick={() => void connect(provider.id)}>{working === provider.id ? "Opening..." : configured ? `Connect ${provider.name}` : "Show required setup"}</button>}</div></article>; })}</section><section className="panel integration-launch-note"><h2>Provider setup</h2><p>Gusto Flows securely handle company onboarding, bank verification, tax setup, employees, payroll review, direct deposits, and payroll history. Demo mode never moves real money; production requires Gusto approval.</p></section></main></div>;
+  return <div className="settings-reference settings-feature-page"><SettingsSectionNav active="integrations" onNavigate={onNavigate} /><main className="settings-reference-main"><header className="settings-feature-head"><div><p className="eyebrow">LIVE CONNECTIONS</p><h1>Integrations</h1><p>Authorize providers securely, verify access, and disconnect accounts from one place.</p></div></header><div className="settings-integration-note"><strong>Secure OAuth</strong><span>Provider passwords never pass through CoreShift. Access and refresh tokens are encrypted before storage and isolated by business.</span></div><section className="settings-integration-grid">{providers.map((provider) => { const status = statuses[provider.id]; const connected = status?.connected; const configured = status?.configured; const gustoDemoMode = provider.id === "gusto" && status?.environment === "demo"; return <article className="settings-integration-card live" key={provider.id}><div className="integration-card-head"><span>{provider.badge}</span><div><h3>{provider.name}</h3><em className={connected ? "connected" : configured ? "ready" : ""}>{loading ? "Checking" : connected ? "Connected" : configured ? gustoDemoMode ? "Demo credentials ready" : "Ready to connect" : "Configuration needed"}</em></div></div><p>{provider.description}</p>{connected ? <div className="integration-account"><strong>{status.accountName || provider.name}</strong><span>Connected {status.connectedAt ? new Date(status.connectedAt).toLocaleDateString() : "recently"}</span></div> : <div className="integration-requirements"><strong>{configured ? gustoDemoMode ? "Connect a partner-managed demo company" : "Provider app is configured" : "Private credentials required"}</strong><span>{configured ? gustoDemoMode ? "Paste the company UUID and masked token values only into this secure form." : "Continue to the provider consent screen." : status?.missing?.join(", ") || "Loading configuration..."}</span>{status?.callbackUrl && !gustoDemoMode && <small>Callback: {status.callbackUrl}</small>}</div>}{!connected && configured && gustoDemoMode && <div className="integration-demo-token-form"><label>Company UUID<input value={gustoDemo.companyId} autoComplete="off" onChange={(event) => setGustoDemo((current) => ({ ...current, companyId: event.target.value }))} placeholder="Demo company UUID" /></label><label>Company name<input value={gustoDemo.companyName} autoComplete="organization" onChange={(event) => setGustoDemo((current) => ({ ...current, companyName: event.target.value }))} /></label><label>Access token<input type="password" value={gustoDemo.accessToken} autoComplete="new-password" onChange={(event) => setGustoDemo((current) => ({ ...current, accessToken: event.target.value }))} placeholder="Paste from Gusto Developer Portal" /></label><label>Refresh token<input type="password" value={gustoDemo.refreshToken} autoComplete="new-password" onChange={(event) => setGustoDemo((current) => ({ ...current, refreshToken: event.target.value }))} placeholder="Paste from Gusto Developer Portal" /></label><small>Submitted over HTTPS, validated with Gusto, encrypted immediately, and isolated to this business.</small></div>}<div className="integration-live-actions">{connected ? provider.id === "gusto" ? <><button className="primary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("company_onboarding")}>{working === provider.id ? "Opening..." : "Company setup"}</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("employee_management")}>Employees</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("run_payroll")}>Run payroll</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void gustoFlow("payroll_history")}>History</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void test(provider.id)}>Test</button><button className="text-button" type="button" disabled={working === provider.id} onClick={() => void disconnect(provider.id)}>Disconnect</button></> : <><button className="primary-button" type="button" disabled={working === provider.id} onClick={() => void test(provider.id)}>{working === provider.id ? "Checking..." : "Test connection"}</button><button className="secondary-button" type="button" disabled={working === provider.id} onClick={() => void disconnect(provider.id)}>Disconnect</button></> : gustoDemoMode && configured ? <button className="primary-button" type="button" disabled={loading || working === provider.id || !gustoDemo.companyId || !gustoDemo.accessToken || !gustoDemo.refreshToken} onClick={() => void connectGustoDemo()}>{working === provider.id ? "Validating securely..." : "Connect demo company"}</button> : <button className="primary-button" type="button" disabled={loading || working === provider.id} onClick={() => void connect(provider.id)}>{working === provider.id ? "Opening..." : configured ? `Connect ${provider.name}` : "Show required setup"}</button>}</div></article>; })}</section><section className="panel integration-launch-note"><h2>Provider setup</h2><p>Gusto Flows securely handle company onboarding, bank verification, tax setup, employees, payroll review, direct deposits, and payroll history. Demo mode never moves real money; production requires Gusto approval.</p></section></main></div>;
 }
 
 function SecuritySettingsPage({ flash, onNavigate }: { flash: (message: string) => void; onNavigate: (section: SettingsSection) => void }) {
@@ -4105,3 +4213,5 @@ function WeekBars({ dailyMinutes }: { dailyMinutes: number[] }) {
 function EmptyState({ title, message }: { title: string; message: string }) {
   return <div className="empty-state"><strong>{title}</strong><p>{message}</p></div>;
 }
+
+

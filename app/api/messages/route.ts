@@ -15,12 +15,32 @@ async function access() {
   return { viewer, enabled: setting?.value !== "false" };
 }
 
+function readReceiptTimeLabel(readAt: number) {
+  const date = new Date(readAt);
+  const now = new Date();
+  const time = date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return date.toDateString() === now.toDateString()
+    ? `at ${time}`
+    : `on ${date.toLocaleDateString([], { month: "short", day: "numeric" })} at ${time}`;
+}
+
+function readReceiptLabel(readerName: string, readAt: number) {
+  return `${readerName} ${readReceiptTimeLabel(readAt)}`;
+}
+
+function summarizeReadReceipts(receipts: Array<{ readerType: string; readerId: number; readerName: string; readAt: number }>) {
+  if (receipts.length <= 2) return receipts.map((receipt) => ({ ...receipt, readerName: readReceiptLabel(receipt.readerName, receipt.readAt) }));
+  const latest = receipts[receipts.length - 1];
+  return [{ ...latest, readerName: `${receipts.length} people, latest ${readReceiptTimeLabel(latest.readAt)}` }];
+}
+
 export async function GET(request: Request) {
   const { viewer, enabled } = await access();
   if (viewer.access === "pending") return Response.json({ error: "Not authorized" }, { status: 403 });
   if (!enabled) return Response.json({ enabled: false, messages: [] });
   const viewerType = viewer.access === "employee" ? "employee" : "owner";
   const viewerId = viewer.actorId;
+  const now = Date.now();
   const isSentByViewer = (message: { senderType: string; senderId: number; senderName: string }) => message.senderType === viewerType && (message.senderId === viewerId || (viewerType === "owner" && message.senderId === 0 && message.senderName === viewer.displayName));
   const url = new URL(request.url);
   if (url.searchParams.get("list") === "1") {
@@ -32,10 +52,11 @@ export async function GET(request: Request) {
     return Response.json({ enabled: true, recentConversations, onlinePeople: online.results }, { headers: { "cache-control": "private, no-store" } });
   }
   const conversationId = url.searchParams.get("conversationId") || "managers";
-  const [rows, reactionRows, readRows] = await Promise.all([
+  const [rows, reactionRows, readRows, typingRows] = await Promise.all([
     database().prepare(`SELECT recent.id, recent.sender_type AS senderType, recent.sender_id AS senderId, recent.sender_name AS senderName, recent.body, recent.image_data AS imageData, recent.image_name AS imageName, recent.created_at AS createdAt, recent.reply_to_id AS replyToId, parent.sender_name AS replySenderName, parent.body AS replyBody FROM (SELECT id, sender_type, sender_id, sender_name, body, image_data, image_name, created_at, reply_to_id FROM messages WHERE business_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 100) recent LEFT JOIN messages parent ON parent.id = recent.reply_to_id AND parent.business_id = ? ORDER BY recent.created_at ASC, recent.id ASC`).bind(viewer.businessId, conversationId, viewer.businessId).all(),
     database().prepare(`SELECT mr.message_id AS messageId, mr.emoji, COUNT(*) AS count, MAX(CASE WHEN mr.reactor_type = ? AND mr.reactor_id = ? THEN 1 ELSE 0 END) AS reactedByViewer FROM message_reactions mr JOIN messages m ON m.id = mr.message_id WHERE mr.business_id = ? AND m.conversation_id = ? GROUP BY mr.message_id, mr.emoji`).bind(viewerType, viewerId, viewer.businessId, conversationId).all<{ messageId: number; emoji: string; count: number; reactedByViewer: number }>(),
     database().prepare(`SELECT mr.message_id AS messageId, mr.reader_type AS readerType, mr.reader_id AS readerId, mr.reader_name AS readerName, mr.read_at AS readAt FROM message_reads mr JOIN messages m ON m.id = mr.message_id WHERE mr.business_id = ? AND m.conversation_id = ? ORDER BY mr.read_at ASC`).bind(viewer.businessId, conversationId).all<{ messageId: number; readerType: string; readerId: number; readerName: string; readAt: number }>(),
+    database().prepare("SELECT user_type AS userType, user_id AS userId, user_name AS userName, last_seen AS lastSeen FROM message_presence WHERE business_id = ? AND conversation_id = ? AND typing_until > ? AND NOT (user_type = ? AND user_id = ?) ORDER BY user_name ASC").bind(viewer.businessId, conversationId, now, viewerType, viewerId).all(),
   ]);
   const reactionsByMessage = new Map<number, Array<{ emoji: string; count: number; reactedByViewer: boolean }>>();
   for (const reaction of reactionRows.results) {
@@ -50,8 +71,9 @@ export async function GET(request: Request) {
     receipts.push(receipt);
     readsByMessage.set(receipt.messageId, receipts);
   }
+  for (const [messageId, receipts] of readsByMessage) readsByMessage.set(messageId, summarizeReadReceipts(receipts));
   const messages = (rows.results as Array<{ id: number; senderType: string; senderId: number; senderName: string; replyToId?: number | null; replySenderName?: string | null; replyBody?: string | null }>).map((message) => ({ ...message, replyTo: message.replyToId && message.replySenderName ? { id: message.replyToId, senderName: message.replySenderName, body: message.replyBody || "Photo" } : null, sentByViewer: isSentByViewer(message), reactions: reactionsByMessage.get(message.id) ?? [], readBy: readsByMessage.get(message.id) ?? [] }));
-  return Response.json({ enabled: true, messages }, { headers: { "cache-control": "private, no-store" } });
+  return Response.json({ enabled: true, messages, typingPeople: typingRows.results }, { headers: { "cache-control": "private, no-store" } });
 }
 
 export async function POST(request: Request) {
@@ -81,11 +103,21 @@ export async function PATCH(request: Request) {
   const { viewer, enabled } = await access();
   if (viewer.access === "pending") return Response.json({ error: "Not authorized" }, { status: 403 });
   if (!enabled) return Response.json({ error: "Messaging is disabled by the owner." }, { status: 403 });
-  const body = await request.json() as { action?: "presence"; conversationId?: string; throughMessageId?: number };
+  const body = await request.json() as { action?: "presence" | "typing"; conversationId?: string; throughMessageId?: number; typing?: boolean };
   if (body.action === "presence") {
     const userType = viewer.access === "employee" ? "employee" : "owner";
     const userId = viewer.actorId;
     await database().prepare("INSERT INTO message_presence (business_id, user_type, user_id, user_name, last_seen) VALUES (?, ?, ?, ?, ?) ON CONFLICT (business_id, user_type, user_id) DO UPDATE SET user_name = excluded.user_name, last_seen = excluded.last_seen").bind(viewer.businessId, userType, userId, viewer.displayName, Date.now()).run();
+    return Response.json({ ok: true });
+  }
+  if (body.action === "typing") {
+    const conversationId = body.conversationId?.trim().slice(0, 120);
+    if (!conversationId) return Response.json({ error: "Invalid typing state." }, { status: 400 });
+    const userType = viewer.access === "employee" ? "employee" : "owner";
+    const userId = viewer.actorId;
+    const now = Date.now();
+    const typingUntil = body.typing === false ? 0 : now + 6_000;
+    await database().prepare("INSERT INTO message_presence (business_id, user_type, user_id, user_name, conversation_id, typing_until, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (business_id, user_type, user_id) DO UPDATE SET user_name = excluded.user_name, conversation_id = excluded.conversation_id, typing_until = excluded.typing_until, last_seen = excluded.last_seen").bind(viewer.businessId, userType, userId, viewer.displayName, conversationId, typingUntil, now).run();
     return Response.json({ ok: true });
   }
   const conversationId = body.conversationId?.trim().slice(0, 120);

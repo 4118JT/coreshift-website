@@ -1,4 +1,4 @@
-const CACHE_NAME = "coreshift-shell-v3";
+const CACHE_NAME = "coreshift-shell-v4";
 const APP_SHELL = ["/manifest.webmanifest", "/favicon.svg", "/coreshift-apple-icon.png"];
 
 self.addEventListener("install", (event) => {
@@ -22,4 +22,16 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin || !APP_SHELL.includes(url.pathname)) return;
 
   event.respondWith(caches.match(event.request).then((cached) => cached ?? fetch(event.request)));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const href = event.notification.data?.href || "/";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      const existing = clients.find((client) => "focus" in client && new URL(client.url).pathname === href);
+      if (existing) return existing.focus();
+      return self.clients.openWindow(href);
+    }),
+  );
 });

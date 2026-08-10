@@ -1,7 +1,7 @@
 import { database, ensureDatabase } from "./runtime";
 
 const AUTH_PEPPER = "bdaaff613afcb6f984053c1a0c7df974e6facd9d8d59b75803032e3c3db667d8";
-const SESSION_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const PASSWORD_ITERATIONS = 100_000;
 
 async function sha256(value: string) {
@@ -126,8 +126,19 @@ export async function createAppSession(
       session.expiresAt,
       session.createdAt,
     ),
+    database().prepare(`DELETE FROM app_sessions WHERE token_hash IN (
+      SELECT token_hash FROM app_sessions
+      WHERE ((? IS NOT NULL AND owner_id = ?) OR (? IS NOT NULL AND employee_id = ?))
+      ORDER BY created_at DESC LIMIT -1 OFFSET 5
+    )`).bind(session.ownerId, session.ownerId, session.employeeId, session.employeeId),
   ]);
   return session.token;
+}
+
+export async function revokeAppSession(token: string | undefined) {
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) return;
+  await ensureDatabase();
+  await database().prepare("DELETE FROM app_sessions WHERE token_hash = ?").bind(await sha256(token)).run();
 }
 
 export async function buildAppSession(

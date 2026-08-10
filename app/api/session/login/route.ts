@@ -6,12 +6,15 @@ import {
 } from "../../../../db/app-auth";
 import { database, ensureDatabase } from "../../../../db/runtime";
 import { isDemoBusiness, resetDemoWorkspace } from "../../../../db/demo";
+import { enforceRateLimit, rateLimitResponse, recordAudit } from "../../../../db/security";
 
 const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILURES = 5;
 
 export async function POST(request: Request) {
   await ensureDatabase();
+  const broadLimit = await enforceRateLimit(request, "login", "all", 30, ATTEMPT_WINDOW_MS);
+  if (!broadLimit.allowed) return rateLimitResponse(broadLimit.retryAfter);
   const body = await request.json() as {
     mode?: string;
     identifier?: string;
@@ -92,6 +95,7 @@ export async function POST(request: Request) {
         window_start = excluded.window_start,
         locked_until = excluded.locked_until
     `).bind(attemptKey, failures, windowStart, lockedUntil).run();
+    await recordAudit({ actorType: "anonymous", action: "session.login", outcome: "denied", metadata: { mode }, request });
     return Response.json({ error: mode === "owner" ? "Owner login is incorrect." : "Email or password is incorrect." }, { status: 401 });
   }
   await database().prepare("DELETE FROM login_attempts WHERE key = ?").bind(attemptKey).run();
@@ -100,11 +104,12 @@ export async function POST(request: Request) {
   }
   const sessionAccess = ownerId ? "owner" : "employee";
   const token = await createAppSession(sessionAccess, employeeId, ownerId);
+  await recordAudit({ businessId: ownerBusinessId, actorType: sessionAccess, actorId: ownerId || employeeId, action: "session.login", request });
   return Response.json(
     { ok: true },
     {
       headers: {
-        "set-cookie": `hourmark_session=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`,
+        "set-cookie": `hourmark_session=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`,
       },
     },
   );

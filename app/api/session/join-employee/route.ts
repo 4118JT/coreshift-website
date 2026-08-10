@@ -5,6 +5,7 @@ import {
   hashPassword,
 } from "../../../../db/app-auth";
 import { database, ensureDatabase } from "../../../../db/runtime";
+import { recordAudit } from "../../../../db/security";
 
 const ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILURES = 5;
@@ -82,6 +83,7 @@ export async function POST(request: Request) {
       `).bind(session.tokenHash, employeeId, session.expiresAt, session.createdAt),
       database().prepare("DELETE FROM login_attempts WHERE key = ?").bind(attemptKey),
     ]);
+    await recordAudit({ businessId: business.id, actorType: "employee", actorId: employeeId, action: "employee.joined", targetType: "employee", targetId: employeeId, request });
   } catch {
     return Response.json(
       { error: "That email already belongs to an employee in this company." },
@@ -94,7 +96,7 @@ export async function POST(request: Request) {
     {
       status: 201,
       headers: {
-        "set-cookie": `hourmark_session=${session.token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`,
+        "set-cookie": `hourmark_session=${session.token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`,
       },
     },
   );
