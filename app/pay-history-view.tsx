@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 type HistoryEmployee = {
   id: number;
@@ -58,6 +58,8 @@ type CurrentRow = {
   estimatedCents: number;
 };
 
+type DayEntry = { id: number; clockIn: number; clockOut: number | null; note: string | null };
+
 export default function PersistentPayHistoryView({ currentPayPeriod, currentPeriodStart, periodDays, payFrequency, currentRows, currentEstimatedCost, currentPaidIds, money, flash }: {
   currentPayPeriod: string;
   currentPeriodStart: number;
@@ -75,6 +77,12 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [recordingPayment, setRecordingPayment] = useState("");
   const [dailyHoursFor, setDailyHoursFor] = useState("");
+  const [selectedDay, setSelectedDay] = useState<{ key: string; start: number; end: number; employeeId: number; employeeName: string } | null>(null);
+  const [dayEntries, setDayEntries] = useState<DayEntry[]>([]);
+  const [loadingEntries, setLoadingEntries] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<DayEntry | null>(null);
+  const [entryError, setEntryError] = useState("");
+  const [historyRefresh, setHistoryRefresh] = useState(0);
 
   useEffect(() => {
     const currentStart = currentPeriodStart;
@@ -108,7 +116,7 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
       .then((results) => { setPeriods(results); setExpanded(new Set(results.length ? [results[0].start] : [])); })
       .catch((reason: Error) => setError(reason.message))
       .finally(() => setLoading(false));
-  }, [currentPayPeriod, currentPeriodStart, periodDays]);
+  }, [currentPayPeriod, currentPeriodStart, periodDays, historyRefresh]);
 
   const fallbackPeriod = useMemo<HistoryPeriod>(() => ({
     start: 0,
@@ -167,6 +175,37 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
     }
   }
 
+  async function openDay(period: HistoryPeriod, row: HistoryRow, index: number) {
+    const start = period.start + index * 86400000;
+    const end = start + 86400000;
+    const key = `${period.start}:${row.employee.id}:${index}`;
+    if (selectedDay?.key === key) { setSelectedDay(null); setEditingEntry(null); return; }
+    setSelectedDay({ key, start, end, employeeId: row.employee.id, employeeName: row.employee.name });
+    setEditingEntry(null); setEntryError(""); setLoadingEntries(true);
+    try {
+      const response = await fetch(`/api/employees/${row.employee.id}`, { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as { entries?: DayEntry[]; error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error ?? "That day could not be loaded.");
+      setDayEntries((payload?.entries ?? []).filter((entry) => entry.clockIn < end && (entry.clockOut ?? Date.now()) > start).sort((left, right) => left.clockIn - right.clockIn));
+    } catch (reason) {
+      setEntryError(reason instanceof Error ? reason.message : "That day could not be loaded.");
+      setDayEntries([]);
+    } finally { setLoadingEntries(false); }
+  }
+
+  async function saveEntry(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingEntry) return;
+    const form = new FormData(event.currentTarget);
+    const clockIn = new Date(String(form.get("clockIn"))).getTime();
+    const clockOutValue = String(form.get("clockOut") ?? "");
+    const clockOut = clockOutValue ? new Date(clockOutValue).getTime() : null;
+    const response = await fetch(`/api/time-entries/${editingEntry.id}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ clockIn, clockOut }) }).catch(() => null);
+    const payload = response ? await response.json().catch(() => null) as { error?: string } | null : null;
+    if (!response?.ok) { setEntryError(payload?.error ?? "That time entry could not be saved."); return; }
+    setEditingEntry(null); setEntryError(""); setHistoryRefresh((value) => value + 1); flash("Time entry updated.");
+  }
+
   function downloadHistory() {
     const header = ["Pay period", "Employee", "Role", "Regular hours", "Overtime hours", "Pay rate", "Estimated pay", "Paid", "Owed", "Status"];
     const lines = visibleHistory.flatMap((period) => period.rows.map((row) => [period.label, row.employee.name, row.employee.role, formatHours(row.regularMinutes), formatHours(row.overtimeMinutes), money(row.employee.hourlyRateCents ?? 0), money(row.estimatedCents), money(row.paidCents), money(row.owedCents), row.status]));
@@ -186,7 +225,8 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
     <div className="pay-history-kpis"><article className="panel"><span className="payroll-icon green">$</span><small>Total payroll</small><strong>{money(current.estimatedCost)}</strong><em>Current period</em></article><article className="panel"><span className="payroll-icon purple">#</span><small>Employees paid</small><strong>{current.paidCount} / {current.rows.length}</strong><em>Current period</em></article><article className="panel"><span className="payroll-icon blue">H</span><small>Total hours</small><strong>{formatHours(totalHours)}</strong><em>Current period</em></article><article className="panel"><span className="payroll-icon orange">A</span><small>Average labor cost</small><strong>{money(Math.round(averageRate))} / hr</strong><em>Current period</em></article></div>
     <div className="pay-history-grid"><article className="panel pay-history-list"><div className="pay-history-list-head"><div><h2>Payroll periods</h2><p>Each previous pay period uses the same employee payroll layout as the current period.</p></div><button className="secondary-button" type="button" onClick={downloadHistory}>Download data</button></div>
       {loading && <p>Loading previous payroll periods...</p>}
-      {visibleHistory.map((period) => { const isExpanded = expanded.has(period.start); const allPaid = period.rows.length > 0 && period.paidCount === period.rows.length; return <div className={`pay-period-row ${isExpanded ? "expanded" : ""}`} key={period.start}><button className="pay-period-summary" type="button" onClick={() => togglePeriod(period.start)}><span className="pay-chevron">{isExpanded ? "v" : ">"}</span><strong>{period.label}</strong><span className={`history-status ${allPaid ? "paid" : "pending"}`}>{allPaid ? "Paid" : "Owed"}</span><b>{money(period.paidTotal)} paid / {money(period.owedTotal)} owed</b><span>{isExpanded ? "Hide details" : "View details"}</span></button>{isExpanded && <div className="pay-period-details"><div className="pay-history-table pay-history-table-head"><span>Employee</span><span>Hours</span><span>Pay rate</span><span>Paid / Owed</span><span>Status</span></div>{period.rows.map((row) => { const hoursKey = `${period.start}:${row.employee.id}`; const isDailyHoursOpen = dailyHoursFor === hoursKey; return <div className="pay-history-employee" key={row.employee.id}><div className="pay-history-table"><div className="pay-history-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{formatHours(row.totalMinutes)}<small>{row.overtimeMinutes > 0 ? ` (${formatHours(row.overtimeMinutes)} OT)` : ""}</small><button className="daily-hours-toggle" type="button" onClick={() => setDailyHoursFor(isDailyHoursOpen ? "" : hoursKey)}>{isDailyHoursOpen ? "Hide daily hours" : "Hours by day"}</button></span><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><div className="pay-history-money"><span><small>Paid</small><strong>{money(row.paidCents)}</strong></span><span className={row.owedCents > 0 ? "has-balance" : ""}><small>Owed</small><strong>{money(row.owedCents)}</strong></span></div>{row.status === "Paid" ? <span className="history-status paid">Paid</span> : <button className="history-status pending action" type="button" disabled={recordingPayment === hoursKey} onClick={() => void markPaid(period, row)}>{recordingPayment === hoursKey ? "Saving..." : "Mark paid"}</button>}</div>{isDailyHoursOpen && <div className="history-daily-hours"><strong>Hours by day</strong><div>{row.dailyMinutes.map((minutes, index) => <span key={index}><small>{new Date(period.start + index * 86400000).toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" })}</small><b>{formatHours(minutes)}</b></span>)}</div></div>}</div>; })}{!period.rows.length && <p>No recorded time or payments for this week.</p>}</div>}</div>; })}
+      {visibleHistory.map((period) => { const isExpanded = expanded.has(period.start); const allPaid = period.rows.length > 0 && period.paidCount === period.rows.length; return <div className={`pay-period-row ${isExpanded ? "expanded" : ""}`} key={period.start}><button className="pay-period-summary" type="button" onClick={() => togglePeriod(period.start)}><span className="pay-chevron">{isExpanded ? "v" : ">"}</span><strong>{period.label}</strong><span className={`history-status ${allPaid ? "paid" : "pending"}`}>{allPaid ? "Paid" : "Owed"}</span><b>{money(period.paidTotal)} paid / {money(period.owedTotal)} owed</b><span>{isExpanded ? "Hide details" : "View details"}</span></button>{isExpanded && <div className="pay-period-details"><div className="pay-history-table pay-history-table-head"><span>Employee</span><span>Hours</span><span>Pay rate</span><span>Paid / Owed</span><span>Status</span></div>{period.rows.map((row) => { const hoursKey = `${period.start}:${row.employee.id}`; const isDailyHoursOpen = dailyHoursFor === hoursKey; return <div className="pay-history-employee" key={row.employee.id}><div className="pay-history-table"><div className="pay-history-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{formatHours(row.totalMinutes)}<small>{row.overtimeMinutes > 0 ? ` (${formatHours(row.overtimeMinutes)} OT)` : ""}</small><button className="daily-hours-toggle" type="button" onClick={() => setDailyHoursFor(isDailyHoursOpen ? "" : hoursKey)}>{isDailyHoursOpen ? "Hide daily hours" : "Hours by day"}</button></span><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><div className="pay-history-money"><span><small>Paid</small><strong>{money(row.paidCents)}</strong></span><span className={row.owedCents > 0 ? "has-balance" : ""}><small>Owed</small><strong>{money(row.owedCents)}</strong></span></div>{row.status === "Paid" ? <span className="history-status paid">Paid</span> : <button className="history-status pending action" type="button" disabled={recordingPayment === hoursKey} onClick={() => void markPaid(period, row)}>{recordingPayment === hoursKey ? "Saving..." : "Mark paid"}</button>}</div>{isDailyHoursOpen && <div className="history-daily-hours"><strong>Hours by day</strong><div>{row.dailyMinutes.map((minutes, index) => <button className="history-day-button" type="button" key={index} onClick={() => void openDay(period, row, index)}><small>{new Date(period.start + index * 86400000).toLocaleDateString("en-US", { weekday: "short", month: "numeric", day: "numeric" })}</small><b>{formatHours(minutes)}</b></button>)}</div></div>}</div>; })}{!period.rows.length && <p>No recorded time or payments for this week.</p>}</div>}</div>; })}
+      {selectedDay && <section className="history-day-entries"><div className="history-day-entries-head"><div><strong>{selectedDay.employeeName}</strong><span>{new Date(selectedDay.start).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" })}</span></div><button className="text-button" type="button" onClick={() => { setSelectedDay(null); setEditingEntry(null); }}>Close</button></div>{entryError && <p className="owner-form-error" role="alert">{entryError}</p>}{loadingEntries ? <p>Loading time entries...</p> : dayEntries.length ? <div className="history-entry-list">{dayEntries.map((entry) => <div className="history-entry" key={entry.id}>{editingEntry?.id === entry.id ? <form onSubmit={saveEntry}><label>Clock in<input name="clockIn" type="datetime-local" required defaultValue={datetimeInput(entry.clockIn)} /></label><label>Clock out<input name="clockOut" type="datetime-local" defaultValue={entry.clockOut ? datetimeInput(entry.clockOut) : ""} /></label><button className="primary-button" type="submit">Save</button><button className="text-button" type="button" onClick={() => setEditingEntry(null)}>Cancel</button></form> : <><span>{formatTime(entry.clockIn)} – {entry.clockOut ? formatTime(entry.clockOut) : "Still clocked in"}<small>{entry.clockOut ? formatHours(Math.max(0, Math.round((entry.clockOut - entry.clockIn) / 60000))) : ""}</small></span><button className="secondary-button" type="button" onClick={() => { setEditingEntry(entry); setEntryError(""); }}>Edit</button></>}</div>)}</div> : <p>No clock-in or clock-out records for this day.</p>}</section>}
       {!loading && visibleHistory.length === 1 && <p>No previous weekly payroll records were found yet.</p>}
     </article><aside className="pay-history-summary panel"><h2>Current week summary</h2><div><span>Total payroll</span><strong>{money(current.estimatedCost)}</strong></div><div><span>Employees paid</span><strong>{current.paidCount} / {current.rows.length}</strong></div><div><span>Total hours</span><strong>{formatHours(totalHours)}</strong></div><div><span>Previous weeks</span><strong>{Math.max(0, visibleHistory.length - 1)}</strong></div><button className="secondary-button" type="button" onClick={downloadHistory}>Download payroll report</button></aside></div>
   </section>;
@@ -210,4 +250,13 @@ function formatPeriod(start: number, end: number) {
 function formatHours(minutes: number) {
   const safe = Math.max(0, Math.round(minutes));
   return `${Math.floor(safe / 60)}h ${safe % 60}m`;
+}
+
+function formatTime(value: number) {
+  return new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function datetimeInput(value: number) {
+  const local = new Date(value - new Date(value).getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
 }
