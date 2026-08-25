@@ -2918,8 +2918,10 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
         receipt.remove();
         return;
       }
-      receipt.textContent = "✓✓ Read";
-      receipt.setAttribute("aria-label", `Read by ${readers.map((reader) => reader.readerName).join(", ")}`);
+      const latestReadAt = Math.max(...readers.map((reader) => reader.readAt));
+      const readTime = new Date(latestReadAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      receipt.textContent = `✓✓ Read ${readTime}`;
+      receipt.setAttribute("aria-label", `Read ${readTime} by ${readers.map((reader) => reader.readerName).join(", ")}`);
       receipt.title = receipt.getAttribute("aria-label") ?? "";
     });
   }, [messages]);
