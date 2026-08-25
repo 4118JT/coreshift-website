@@ -2683,6 +2683,20 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     if (picker) picker.accept = "image/*,video/mp4,video/quicktime,video/x-m4v,video/3gpp";
     const button = document.querySelector<HTMLButtonElement>(".message-photo-button");
     if (button) button.textContent = "Photo or video";
+    const controls = button?.parentElement;
+    if (controls && !controls.querySelector(".message-video-button")) {
+      const videoInput = document.createElement("input");
+      videoInput.type = "file";
+      videoInput.accept = "video/*";
+      videoInput.className = "message-photo-input";
+      const videoButton = document.createElement("button");
+      videoButton.type = "button";
+      videoButton.className = "message-photo-button message-video-button";
+      videoButton.textContent = "Video";
+      videoButton.addEventListener("click", () => videoInput.click());
+      videoInput.addEventListener("change", () => void chooseMessageVideo({ target: videoInput } as React.ChangeEvent<HTMLInputElement>));
+      controls.append(videoInput, videoButton);
+    }
     document.querySelectorAll(".message-video-preview").forEach((preview) => preview.remove());
     const composer = document.querySelector<HTMLTextAreaElement>(".reference-composer textarea");
     const sendButton = document.querySelector<HTMLButtonElement>(".reference-composer .primary-button[type='submit']");
@@ -2878,9 +2892,12 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     const file = event.target.files?.[0]; event.target.value = "";
     if (!file) return;
     const accepted = new Set(["video/mp4", "video/quicktime", "video/x-m4v", "video/3gpp"]);
-    if (!accepted.has(file.type.toLowerCase()) || file.size > 100 * 1024 * 1024) { setError("Choose an MP4, MOV, M4V, or 3GP video up to 100 MB."); return; }
+    const extension = file.name.split(".").pop()?.toLowerCase();
+    const inferredType = extension === "mov" ? "video/quicktime" : extension === "m4v" ? "video/x-m4v" : extension === "3gp" ? "video/3gpp" : "video/mp4";
+    const contentType = accepted.has(file.type.toLowerCase()) ? file.type.toLowerCase() : inferredType;
+    if ((!accepted.has(file.type.toLowerCase()) && !["mp4", "mov", "m4v", "3gp"].includes(extension ?? "")) || file.size > 100 * 1024 * 1024) { setError("Choose an MP4, MOV, M4V, or 3GP video up to 100 MB."); return; }
     setBusy(true); setError("");
-    const response = await fetch("/api/messages/media", { method: "POST", headers: { "content-type": file.type, "x-upload-size": String(file.size) }, body: file }).catch(() => null);
+    const response = await fetch("/api/messages/media", { method: "POST", headers: { "content-type": contentType, "x-upload-size": String(file.size) }, body: file }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as { key?: string; error?: string } | null : null;
     setBusy(false);
     if (!response?.ok || !result?.key) { setError(result?.error ?? "The video could not be uploaded."); return; }
