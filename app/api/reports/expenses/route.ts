@@ -140,11 +140,36 @@ export async function GET(request: Request) {
     FROM employee_payments WHERE paid_at >= ? ${selectedEnd ? "AND paid_at <= ?" : ""} GROUP BY employee_id
   `).bind(...(selectedEnd ? [selectedStart, selectedEnd] : [selectedStart])).all<{ employeeId: number; paidCents: number }>();
   const paidByEmployee = new Map(employeePaid.results.map((row) => [row.employeeId, Math.round(row.paidCents)]));
+  const dailyTimeEntries = await database().prepare(`
+    SELECT te.employee_id AS employeeId, te.clock_in AS clockIn, te.clock_out AS clockOut
+    FROM time_entries te
+    JOIN employees e ON e.id = te.employee_id
+    WHERE e.business_id = ? AND te.clock_out IS NOT NULL AND te.clock_out > ? ${selectedEnd ? "AND te.clock_in <= ?" : ""}
+  `).bind(...(selectedEnd ? [viewer.businessId, selectedStart, selectedEnd] : [viewer.businessId, selectedStart])).all<{
+    employeeId: number; clockIn: number; clockOut: number;
+  }>();
+  const dayLength = 24 * 60 * 60 * 1000;
+  const dayCount = selectedEnd ? Math.max(1, Math.ceil((selectedEnd - selectedStart + 1) / dayLength)) : 7;
+  const dailyMinutesByEmployee = new Map<number, number[]>();
+  for (const entry of dailyTimeEntries.results) {
+    const dailyMinutes = dailyMinutesByEmployee.get(entry.employeeId) ?? Array.from({ length: dayCount }, () => 0);
+    const entryEnd = Math.min(entry.clockOut, selectedEnd ? selectedEnd + 1 : Date.now());
+    let cursor = Math.max(entry.clockIn, selectedStart);
+    while (cursor < entryEnd) {
+      const dayIndex = Math.floor((cursor - selectedStart) / dayLength);
+      if (dayIndex < 0 || dayIndex >= dayCount) break;
+      const dayEnd = selectedStart + (dayIndex + 1) * dayLength;
+      const segmentEnd = Math.min(entryEnd, dayEnd);
+      dailyMinutes[dayIndex] += Math.max(0, Math.round((segmentEnd - cursor) / 60_000));
+      cursor = segmentEnd;
+    }
+    dailyMinutesByEmployee.set(entry.employeeId, dailyMinutes);
+  }
   const employeeReport = employeeHours.results.map((row) => {
     const minutes = Math.max(0, Math.round(row.minutes));
     const earned = Math.round((minutes / 60) * row.hourlyRateCents);
     const paid = paidByEmployee.get(row.id) ?? 0;
-    return { id: row.id, name: row.name, role: row.role, initials: row.initials, color: row.color, hourlyRateCents: row.hourlyRateCents, minutes, earnedCents: earned, paidCents: paid, owedCents: Math.max(0, earned - paid) };
+    return { id: row.id, name: row.name, role: row.role, initials: row.initials, color: row.color, hourlyRateCents: row.hourlyRateCents, minutes, dailyMinutes: dailyMinutesByEmployee.get(row.id) ?? Array.from({ length: dayCount }, () => 0), earnedCents: earned, paidCents: paid, owedCents: Math.max(0, earned - paid) };
   });
 
   return Response.json({
