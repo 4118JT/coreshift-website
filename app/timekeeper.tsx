@@ -265,6 +265,7 @@ const pageCopy: Record<ViewName, [string, string, string]> = {
 };
 
 const formatHours = (minutes: number) => `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, "0")}m`;
+const formatTime = (value: number) => new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 const moneyValue = (cents: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 const preferredTimeZone = () => typeof window !== "undefined" ? window.localStorage.getItem("coreshift-time-zone") || undefined : undefined;
 const formatClockTime = (date: Date) => date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true, ...(preferredTimeZone() ? { timeZone: preferredTimeZone() } : {}) });
@@ -2253,6 +2254,7 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
   const [detailError, setDetailError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const [showAddTime, setShowAddTime] = useState(false);
+  const [editingTimeEntry, setEditingTimeEntry] = useState<number | null>(null);
   const [showPayment, setShowPayment] = useState(false);
 
   useEffect(() => {
@@ -2405,13 +2407,9 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
             {detail.entries.map((entry) => {
               const minutes = entryMinutes(entry);
               const payCents = Math.round(minutes / 60 * detail.employee.hourlyRateCents);
-              return <form className="time-entry-form" key={entry.id} onSubmit={(event) => saveTimeEntry(event, entry.id)}>
-                <label>Start date<input name="clockInDate" type="date" defaultValue={localDateTimeParts(entry.clockIn).date} required /></label><label>Start time<input name="clockInTime" type="time" defaultValue={localDateTimeParts(entry.clockIn).time} required /></label>
-                <label>End date<input name="clockOutDate" type="date" defaultValue={entry.clockOut ? localDateTimeParts(entry.clockOut).date : ""} /></label><label>End time<input name="clockOutTime" type="time" defaultValue={entry.clockOut ? localDateTimeParts(entry.clockOut).time : ""} /></label>
-                <div className="entry-total"><span>{entry.clockOut ? formatHours(minutes) : "Working now"}</span><strong>{money(payCents)}</strong></div>
-                <button className="secondary-button" type="submit">Save</button>
-                <button className="entry-delete-button" type="button" onClick={() => deleteTimeEntry(entry.id)}>Delete</button>
-              </form>;
+              const start = localDateTimeParts(entry.clockIn);
+              const end = entry.clockOut ? localDateTimeParts(entry.clockOut) : null;
+              return <div className="time-entry-card" key={entry.id}><div className="time-entry-row"><div><strong>{new Date(entry.clockIn).toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", year: "numeric" })}</strong><span>{formatTime(entry.clockIn)} – {entry.clockOut ? formatTime(entry.clockOut) : "Working now"}</span></div><span className="time-entry-duration">{entry.clockOut ? formatHours(minutes) : "In progress"}</span><strong className="time-entry-pay">{money(payCents)}</strong><button className="secondary-button" type="button" onClick={() => setEditingTimeEntry(editingTimeEntry === entry.id ? null : entry.id)}>{editingTimeEntry === entry.id ? "Close" : "Edit"}</button></div>{editingTimeEntry === entry.id && <form className="time-entry-form time-entry-edit-form" onSubmit={(event) => saveTimeEntry(event, entry.id)}><label>Start date<input name="clockInDate" type="date" defaultValue={start.date} required /></label><label>Start time<input name="clockInTime" type="time" defaultValue={start.time} required /></label><label>End date<input name="clockOutDate" type="date" defaultValue={end?.date ?? ""} /></label><label>End time<input name="clockOutTime" type="time" defaultValue={end?.time ?? ""} /></label><button className="primary-button" type="submit">Save changes</button><button className="entry-delete-button" type="button" onClick={() => deleteTimeEntry(entry.id)}>Delete</button></form>}</div>;
             })}
             {!detail.entries.length && <EmptyState title="No time entries" message="Clock activity and manually added time appear here." />}
           </div>
