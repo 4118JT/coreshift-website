@@ -485,6 +485,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [unreadMessages, setUnreadMessages] = useState(0);
+  const defaultDocumentTitle = useRef<string | null>(null);
   const [phoneNotificationsEnabled, setPhoneNotificationsEnabled] = useState(false);
   const [phoneNotificationPermission, setPhoneNotificationPermission] = useState<PhoneNotificationPermission>("unsupported");
   const [darkMode, setDarkMode] = useState(false);
@@ -620,6 +621,13 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     window.addEventListener("focus", loadUnreadMessages);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", loadUnreadMessages); };
   }, [isDemo, messagingAllowed, viewer.businessId, viewer.actorId]);
+  useEffect(() => {
+    defaultDocumentTitle.current ??= document.title;
+    document.title = unreadMessages > 0
+      ? `(${unreadMessages}) New message${unreadMessages === 1 ? "" : "s"} — CoreShift`
+      : defaultDocumentTitle.current;
+    return () => { if (defaultDocumentTitle.current) document.title = defaultDocumentTitle.current; };
+  }, [unreadMessages]);
 
   function toggleDarkMode() {
     setDarkMode((current) => {
