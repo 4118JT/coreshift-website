@@ -7,6 +7,12 @@ export function database() {
   return env.DB;
 }
 
+export function mediaBucket() {
+  const media = (env as typeof env & { MEDIA?: R2Bucket }).MEDIA;
+  if (!media) throw new Error("R2 binding MEDIA is unavailable");
+  return media;
+}
+
 export function ensureDatabase() {
   if (ready) return ready;
   ready = (async () => {

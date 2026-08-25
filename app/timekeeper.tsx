@@ -2562,7 +2562,16 @@ type WorkspaceMessage = { id: number; conversationId?: string; senderType: "owne
 const MESSAGE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"] as const;
 
 function messagePreview(message: WorkspaceMessage, _viewerAccess: Viewer["access"]) {
-  return `${message.sentByViewer ? "You" : message.senderName}: ${message.body || (message.imageData ? "Photo" : "Message")}`;
+  const hasVideo = message.imageData?.startsWith("video:");
+  return `${message.sentByViewer ? "You" : message.senderName}: ${message.body || (hasVideo ? "Video" : message.imageData ? "Photo" : "Message")}`;
+}
+
+function messageVideoKey(message: WorkspaceMessage) {
+  return message.imageData?.startsWith("video:") ? message.imageData.slice("video:".length) : null;
+}
+
+function messageVideoUrl(key: string) {
+  return `/api/messages?media=${encodeURIComponent(key)}`;
 }
 
 function messageSentTime(timestamp?: number) {
@@ -2588,6 +2597,8 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const [body, setBody] = useState("");
   const [imageData, setImageData] = useState<string | null>(null);
   const [imageName, setImageName] = useState("");
+  const [videoKey, setVideoKey] = useState<string | null>(null);
+  const [videoName, setVideoName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [ownerPhoto, setOwnerPhoto] = useState<string | null>(null);
@@ -2659,6 +2670,42 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   useEffect(() => {
     try { setOwnerPhoto(window.localStorage.getItem("coreshift-owner-photo")); } catch { /* storage may be unavailable */ }
   }, []);
+  useEffect(() => {
+    const picker = document.querySelector<HTMLInputElement>(".message-photo-input");
+    if (picker) picker.accept = "image/*,video/mp4,video/quicktime,video/x-m4v,video/3gpp";
+    const button = document.querySelector<HTMLButtonElement>(".message-photo-button");
+    if (button) button.textContent = "Photo or video";
+    document.querySelectorAll(".message-video-preview").forEach((preview) => preview.remove());
+    const composer = document.querySelector<HTMLTextAreaElement>(".reference-composer textarea");
+    const sendButton = document.querySelector<HTMLButtonElement>(".reference-composer .primary-button[type='submit']");
+    if (videoKey && composer) {
+      const preview = document.createElement("div");
+      preview.className = "message-photo-preview message-video-preview";
+      const label = document.createElement("span");
+      label.textContent = `Video ready: ${videoName || "Video"}`;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "x";
+      remove.setAttribute("aria-label", "Remove video");
+      remove.addEventListener("click", () => { setVideoKey(null); setVideoName(""); });
+      preview.append(label, remove);
+      composer.before(preview);
+      if (sendButton) sendButton.disabled = busy;
+    }
+    document.querySelectorAll<HTMLImageElement>(".message-photo[src^='video:']").forEach((image) => {
+      const key = image.getAttribute("src")?.slice("video:".length);
+      const link = image.closest<HTMLAnchorElement>(".message-photo-link");
+      if (!key || !link) return;
+      const video = document.createElement("video");
+      video.className = "message-photo";
+      video.src = messageVideoUrl(key);
+      video.controls = true;
+      video.playsInline = true;
+      video.preload = "metadata";
+      video.setAttribute("aria-label", image.alt || "Shared video");
+      link.replaceWith(video);
+    });
+  }, [messages, busy, body, videoKey, videoName]);
   useEffect(() => {
     if (!ownerPhoto) return;
     document.querySelectorAll<HTMLElement>(".conversation-avatar").forEach((element) => {
@@ -2776,6 +2823,8 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     setReplyingTo(null);
     setImageData(null);
     setImageName("");
+    setVideoKey(null);
+    setVideoName("");
     loadMessages();
   }, [activeConversation]);
   useEffect(() => () => stopTyping(), []);
@@ -2801,8 +2850,10 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     items.forEach((item, index) => { item.style.display = visibleConversations.some((conversation) => conversation.id === conversations[index]?.id) ? "grid" : "none"; });
   }, [conversationFilter, conversations]);
   async function chooseMessagePhoto(event: React.ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0]; event.target.value = "";
+    const file = event.target.files?.[0];
     if (!file) return;
+    if (file.type.startsWith("video/")) return chooseMessageVideo(event);
+    event.target.value = "";
     if (!file.type.startsWith("image/") || file.size > 10 * 1024 * 1024) { setError("Choose a photo smaller than 10 MB."); return; }
     setError("");
     const objectUrl = URL.createObjectURL(file);
@@ -2811,18 +2862,30 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
       const limit = 1280; const scale = Math.min(1, limit / Math.max(image.naturalWidth, image.naturalHeight));
       const canvas = document.createElement("canvas"); canvas.width = Math.max(1, Math.round(image.naturalWidth * scale)); canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
       canvas.getContext("2d")?.drawImage(image, 0, 0, canvas.width, canvas.height);
-      setImageData(canvas.toDataURL("image/jpeg", 0.82)); setImageName(file.name.slice(0, 120)); composerRef.current?.focus();
+      setImageData(canvas.toDataURL("image/jpeg", 0.82)); setImageName(file.name.slice(0, 120)); setVideoKey(null); setVideoName(""); composerRef.current?.focus();
     } catch { setError("That photo could not be prepared. Try another image."); }
     finally { URL.revokeObjectURL(objectUrl); }
   }
+  async function chooseMessageVideo(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]; event.target.value = "";
+    if (!file) return;
+    const accepted = new Set(["video/mp4", "video/quicktime", "video/x-m4v", "video/3gpp"]);
+    if (!accepted.has(file.type.toLowerCase()) || file.size > 100 * 1024 * 1024) { setError("Choose an MP4, MOV, M4V, or 3GP video up to 100 MB."); return; }
+    setBusy(true); setError("");
+    const response = await fetch("/api/messages/media", { method: "POST", headers: { "content-type": file.type, "x-upload-size": String(file.size) }, body: file }).catch(() => null);
+    const result = response ? await response.json().catch(() => null) as { key?: string; error?: string } | null : null;
+    setBusy(false);
+    if (!response?.ok || !result?.key) { setError(result?.error ?? "The video could not be uploaded."); return; }
+    setVideoKey(result.key); setVideoName(file.name.slice(0, 120)); setImageData(null); setImageName(""); composerRef.current?.focus();
+  }
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if ((!body.trim() && !imageData) || busy) return; setBusy(true); setError("");
-    const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, imageData, imageName, conversationId: activeConversation, replyToId: replyingTo?.id }) }).catch(() => null);
+    event.preventDefault(); if ((!body.trim() && !imageData && !videoKey) || busy) return; setBusy(true); setError("");
+    const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, imageData, imageName, videoKey, videoName, conversationId: activeConversation, replyToId: replyingTo?.id }) }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as WorkspaceMessage & { error?: string } | null : null;
     setBusy(false); if (!response?.ok) { setError(result?.error ?? "Message could not be sent."); return; }
     if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); }
     stopTyping(activeConversation);
-    setBody(""); setImageData(null); setImageName(""); setReplyingTo(null);
+    setBody(""); setImageData(null); setImageName(""); setVideoKey(null); setVideoName(""); setReplyingTo(null);
   }
   function beginReactionHold(event: React.PointerEvent<HTMLDivElement>, messageId: number) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
