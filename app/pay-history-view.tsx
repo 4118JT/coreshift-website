@@ -71,6 +71,7 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [recordingPayment, setRecordingPayment] = useState("");
 
   useEffect(() => {
     const currentStart = currentPeriodStart;
@@ -130,6 +131,39 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
     });
   }
 
+  async function markPaid(period: HistoryPeriod, row: HistoryRow) {
+    if (row.owedCents <= 0) return;
+    const paymentKey = `${period.start}:${row.employee.id}`;
+    if (!window.confirm(`Mark ${row.employee.name} as paid ${money(row.owedCents)} for ${period.label}?`)) return;
+    setRecordingPayment(paymentKey);
+    try {
+      const response = await fetch("/api/payroll/payments", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ payments: [{ employeeId: row.employee.id, amountCents: row.owedCents }], paidAt: period.end, periodStart: period.start, periodEnd: period.end }),
+      });
+      const payload = await response.json().catch(() => null) as { recorded?: Array<{ employeeId: number; amountCents: number }>; error?: string } | null;
+      if (!response.ok) throw new Error(payload?.error ?? "The payment could not be recorded.");
+      const recordedCents = payload?.recorded?.find((payment) => payment.employeeId === row.employee.id)?.amountCents ?? 0;
+      if (!recordedCents) throw new Error("This payment was already recorded. Refresh the page to see the latest status.");
+      setPeriods((currentPeriods) => currentPeriods.map((currentPeriod) => {
+        if (currentPeriod.start !== period.start) return currentPeriod;
+        const rows = currentPeriod.rows.map((currentRow) => currentRow.employee.id !== row.employee.id ? currentRow : {
+          ...currentRow,
+          paidCents: currentRow.paidCents + recordedCents,
+          owedCents: Math.max(0, currentRow.owedCents - recordedCents),
+          status: currentRow.paidCents + recordedCents >= currentRow.estimatedCents ? "Paid" : "Partially paid" as const,
+        });
+        return { ...currentPeriod, rows, paidTotal: rows.reduce((sum, currentRow) => sum + currentRow.paidCents, 0), owedTotal: rows.reduce((sum, currentRow) => sum + currentRow.owedCents, 0), paidCount: rows.filter((currentRow) => currentRow.status === "Paid").length };
+      }));
+      flash(`${row.employee.name} was marked paid for ${period.label}.`);
+    } catch (reason) {
+      flash(reason instanceof Error ? reason.message : "The payment could not be recorded.");
+    } finally {
+      setRecordingPayment("");
+    }
+  }
+
   function downloadHistory() {
     const header = ["Pay period", "Employee", "Role", "Regular hours", "Overtime hours", "Pay rate", "Estimated pay", "Paid", "Owed", "Status"];
     const lines = visibleHistory.flatMap((period) => period.rows.map((row) => [period.label, row.employee.name, row.employee.role, formatHours(row.regularMinutes), formatHours(row.overtimeMinutes), money(row.employee.hourlyRateCents ?? 0), money(row.estimatedCents), money(row.paidCents), money(row.owedCents), row.status]));
@@ -149,7 +183,7 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
     <div className="pay-history-kpis"><article className="panel"><span className="payroll-icon green">$</span><small>Total payroll</small><strong>{money(current.estimatedCost)}</strong><em>Current period</em></article><article className="panel"><span className="payroll-icon purple">#</span><small>Employees paid</small><strong>{current.paidCount} / {current.rows.length}</strong><em>Current period</em></article><article className="panel"><span className="payroll-icon blue">H</span><small>Total hours</small><strong>{formatHours(totalHours)}</strong><em>Current period</em></article><article className="panel"><span className="payroll-icon orange">A</span><small>Average labor cost</small><strong>{money(Math.round(averageRate))} / hr</strong><em>Current period</em></article></div>
     <div className="pay-history-grid"><article className="panel pay-history-list"><div className="pay-history-list-head"><div><h2>Payroll periods</h2><p>Each previous pay period uses the same employee payroll layout as the current period.</p></div><button className="secondary-button" type="button" onClick={downloadHistory}>Download data</button></div>
       {loading && <p>Loading previous payroll periods...</p>}
-      {visibleHistory.map((period) => { const isExpanded = expanded.has(period.start); const allPaid = period.rows.length > 0 && period.paidCount === period.rows.length; return <div className={`pay-period-row ${isExpanded ? "expanded" : ""}`} key={period.start}><button className="pay-period-summary" type="button" onClick={() => togglePeriod(period.start)}><span className="pay-chevron">{isExpanded ? "v" : ">"}</span><strong>{period.label}</strong><span className={`history-status ${allPaid ? "paid" : "pending"}`}>{allPaid ? "Paid" : "Owed"}</span><b>{money(period.paidTotal)} paid / {money(period.owedTotal)} owed</b><span>{isExpanded ? "Hide details" : "View details"}</span></button>{isExpanded && <div className="pay-period-details"><div className="pay-history-table pay-history-table-head"><span>Employee</span><span>Hours</span><span>Pay rate</span><span>Paid / Owed</span><span>Status</span></div>{period.rows.map((row) => <div className="pay-history-table" key={row.employee.id}><div className="pay-history-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{formatHours(row.totalMinutes)}<small>{row.overtimeMinutes > 0 ? ` (${formatHours(row.overtimeMinutes)} OT)` : ""}</small></span><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><div className="pay-history-money"><span><small>Paid</small><strong>{money(row.paidCents)}</strong></span><span className={row.owedCents > 0 ? "has-balance" : ""}><small>Owed</small><strong>{money(row.owedCents)}</strong></span></div><span className={`history-status ${row.status === "Paid" ? "paid" : "pending"}`}>{row.status}</span></div>)}{!period.rows.length && <p>No recorded time or payments for this week.</p>}</div>}</div>; })}
+      {visibleHistory.map((period) => { const isExpanded = expanded.has(period.start); const allPaid = period.rows.length > 0 && period.paidCount === period.rows.length; return <div className={`pay-period-row ${isExpanded ? "expanded" : ""}`} key={period.start}><button className="pay-period-summary" type="button" onClick={() => togglePeriod(period.start)}><span className="pay-chevron">{isExpanded ? "v" : ">"}</span><strong>{period.label}</strong><span className={`history-status ${allPaid ? "paid" : "pending"}`}>{allPaid ? "Paid" : "Owed"}</span><b>{money(period.paidTotal)} paid / {money(period.owedTotal)} owed</b><span>{isExpanded ? "Hide details" : "View details"}</span></button>{isExpanded && <div className="pay-period-details"><div className="pay-history-table pay-history-table-head"><span>Employee</span><span>Hours</span><span>Pay rate</span><span>Paid / Owed</span><span>Status</span></div>{period.rows.map((row) => <div className="pay-history-table" key={row.employee.id}><div className="pay-history-person"><span className={`avatar ${row.employee.color}`}>{row.employee.initials}</span><strong>{row.employee.name}<small>{row.employee.role}</small></strong></div><span>{formatHours(row.totalMinutes)}<small>{row.overtimeMinutes > 0 ? ` (${formatHours(row.overtimeMinutes)} OT)` : ""}</small></span><span>{money(row.employee.hourlyRateCents ?? 0)} / hr</span><div className="pay-history-money"><span><small>Paid</small><strong>{money(row.paidCents)}</strong></span><span className={row.owedCents > 0 ? "has-balance" : ""}><small>Owed</small><strong>{money(row.owedCents)}</strong></span></div>{row.status === "Paid" ? <span className="history-status paid">Paid</span> : <button className="history-status pending action" type="button" disabled={recordingPayment === `${period.start}:${row.employee.id}`} onClick={() => void markPaid(period, row)}>{recordingPayment === `${period.start}:${row.employee.id}` ? "Saving..." : "Mark paid"}</button>}</div>)}{!period.rows.length && <p>No recorded time or payments for this week.</p>}</div>}</div>; })}
       {!loading && visibleHistory.length === 1 && <p>No previous weekly payroll records were found yet.</p>}
     </article><aside className="pay-history-summary panel"><h2>Current week summary</h2><div><span>Total payroll</span><strong>{money(current.estimatedCost)}</strong></div><div><span>Employees paid</span><strong>{current.paidCount} / {current.rows.length}</strong></div><div><span>Total hours</span><strong>{formatHours(totalHours)}</strong></div><div><span>Previous weeks</span><strong>{Math.max(0, visibleHistory.length - 1)}</strong></div><button className="secondary-button" type="button" onClick={downloadHistory}>Download payroll report</button></aside></div>
   </section>;
