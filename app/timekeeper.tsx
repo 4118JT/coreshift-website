@@ -2887,6 +2887,17 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     stopTyping(activeConversation);
     setBody(""); setImageData(null); setImageName(""); setVideoKey(null); setVideoName(""); setReplyingTo(null);
   }
+  useEffect(() => {
+    const composer = composerRef.current;
+    if (!composer) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Enter" || event.shiftKey || event.isComposing || busy || (!body.trim() && !imageData && !videoKey)) return;
+      event.preventDefault();
+      composer.closest("form")?.requestSubmit();
+    };
+    composer.addEventListener("keydown", handleKeyDown);
+    return () => composer.removeEventListener("keydown", handleKeyDown);
+  }, [body, busy, imageData, videoKey]);
   function beginReactionHold(event: React.PointerEvent<HTMLDivElement>, messageId: number) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     if (reactionHoldRef.current) window.clearTimeout(reactionHoldRef.current.timer);
