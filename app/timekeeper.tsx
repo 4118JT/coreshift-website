@@ -1475,10 +1475,25 @@ function TimeClock({ employees, working, now, toggleClock, employeeMode = false,
   const totalToday = employees.reduce((sum, employee) => sum + employee.weeklyMinutes, 0);
   const laborCost = employees.reduce((sum, employee) => sum + Math.round(employee.weeklyMinutes / 60 * (employee.hourlyRateCents ?? 0)), 0);
   const [gpsStatus, setGpsStatus] = useState("Checking GPS…");
+  const [gpsAccuracy, setGpsAccuracy] = useState<number | null>(null);
   function requestGps() {
     if (typeof navigator === "undefined" || !navigator.geolocation) { setGpsStatus("GPS unavailable"); return; }
-    setGpsStatus("Requesting GPS…");
-    navigator.geolocation.getCurrentPosition(() => setGpsStatus("GPS active"), () => setGpsStatus("GPS permission needed"), { enableHighAccuracy: true, maximumAge: 30000, timeout: 8000 });
+    setGpsStatus("Finding a precise GPS signal…"); setGpsAccuracy(null);
+    let bestAccuracy = Number.POSITIVE_INFINITY;
+    let samples = 0;
+    const watchId = navigator.geolocation.watchPosition((position) => {
+      samples += 1;
+      bestAccuracy = Math.min(bestAccuracy, position.coords.accuracy);
+      setGpsAccuracy(bestAccuracy);
+      if (bestAccuracy <= 25 || samples >= 3) {
+        navigator.geolocation.clearWatch(watchId);
+        setGpsStatus(bestAccuracy <= 25 ? "GPS locked" : "GPS needs a clearer signal");
+      } else setGpsStatus("Refining GPS position…");
+    }, () => setGpsStatus("GPS permission needed"), { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 });
+    window.setTimeout(() => {
+      navigator.geolocation.clearWatch(watchId);
+      if (Number.isFinite(bestAccuracy)) setGpsStatus(bestAccuracy <= 50 ? "GPS active" : "GPS needs a clearer signal");
+    }, 16000);
   }
   useEffect(() => {
     requestGps();
@@ -1491,7 +1506,7 @@ function TimeClock({ employees, working, now, toggleClock, employeeMode = false,
       <article className="panel clock-table-panel not-clocked-panel"><PanelHead title={`Not Clocked In (${Math.max(0, employees.length - working.length)})`} subtitle="Employees scheduled but not currently working" /><EmployeeRows employees={employees.filter((employee) => employee.status !== "clocked_in")} toggleClock={toggleClock} onEditTime={onEditTime} /></article>
     </div>
     <div className="clock-reference-right">
-      <article className="panel clock-map-panel"><div className="map-head"><div><h3>Live GPS Clock In Map</h3><small className="gps-status">● {gpsStatus} <button className="gps-enable-button" type="button" onClick={requestGps}>Enable GPS</button></small></div><Link className="text-button" href="/time-clock">View full map →</Link></div><div className="clock-map"><span className="map-road road-a" /><span className="map-road road-b" /><span className="map-pin pin-a">{working[0]?.initials ?? ""}</span><span className="map-pin pin-b">{working[1]?.initials ?? ""}</span><span className="map-pin pin-c">{working[2]?.initials ?? ""}</span><span className="map-center">⌖</span></div><div className="map-legend"><span><i className="online" />GPS clocked in</span><span><i className="break" />On break</span><span><i className="offline" />Clocked out</span></div></article>
+      <article className="panel clock-map-panel"><div className="map-head"><div><h3>Live GPS Clock In Map</h3><small className="gps-status">● {gpsStatus}{gpsAccuracy !== null ? ` · ±${Math.round(gpsAccuracy)}m` : ""} <button className="gps-enable-button" type="button" onClick={requestGps}>Refresh GPS</button></small></div><Link className="text-button" href="/time-clock">View full map →</Link></div><div className="clock-map"><span className="map-road road-a" /><span className="map-road road-b" /><span className="map-pin pin-a">{working[0]?.initials ?? ""}</span><span className="map-pin pin-b">{working[1]?.initials ?? ""}</span><span className="map-pin pin-c">{working[2]?.initials ?? ""}</span><span className="map-center">⌖</span></div><div className="map-legend"><span><i className="online" />GPS clocked in</span><span><i className="break" />On break</span><span><i className="offline" />Clocked out</span></div></article>
       <article className="panel recent-activity"><PanelHead title="Recent Activity" action={<Link className="text-button" href="/time-clock">View all activity →</Link>} />{working.map((person, index) => <div className="timeline-row" key={person.id}><span className="timeline-mark" /><div><strong>{person.name} clocked in</strong><p>Main Street Café</p></div><small>{person.clockIn ?? (index === 0 ? "Now" : "Recently")}</small></div>)}{!working.length && <EmptyState title="No activity recorded" message="Clock-ins and clock-outs will appear here." />}</article>
     </div>
   </section>
