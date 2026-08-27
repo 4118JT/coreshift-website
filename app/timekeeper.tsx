@@ -487,6 +487,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const [unreadNotifications, setUnreadNotifications] = useState(0);
   const [unreadMessages, setUnreadMessages] = useState(0);
   const defaultDocumentTitle = useRef<string | null>(null);
+  const defaultFaviconHref = useRef<string | null>(null);
   const [phoneNotificationsEnabled, setPhoneNotificationsEnabled] = useState(false);
   const [phoneNotificationPermission, setPhoneNotificationPermission] = useState<PhoneNotificationPermission>("unsupported");
   const [darkMode, setDarkMode] = useState(false);
@@ -618,7 +619,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
       setUnreadMessages(result.recentConversations.reduce((total, conversation) => total + Math.max(0, Number(conversation.unread) || 0), 0));
     };
     loadUnreadMessages();
-    const timer = window.setInterval(loadUnreadMessages, 6000);
+    const timer = window.setInterval(loadUnreadMessages, 2000);
     window.addEventListener("focus", loadUnreadMessages);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", loadUnreadMessages); };
   }, [isDemo, messagingAllowed, viewer.businessId, viewer.actorId]);
@@ -628,6 +629,20 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
       ? `(${unreadMessages}) New message${unreadMessages === 1 ? "" : "s"} — CoreShift`
       : defaultDocumentTitle.current;
     return () => { if (defaultDocumentTitle.current) document.title = defaultDocumentTitle.current; };
+  }, [unreadMessages]);
+  useEffect(() => {
+    const favicon = document.querySelector<HTMLLinkElement>("link[rel~='icon']") ?? document.head.appendChild(document.createElement("link"));
+    favicon.rel = "icon";
+    defaultFaviconHref.current ??= favicon.href;
+    if (!unreadMessages) { if (defaultFaviconHref.current) favicon.href = defaultFaviconHref.current; return; }
+    const canvas = document.createElement("canvas");
+    canvas.width = 64; canvas.height = 64;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.fillStyle = "#1786e8"; context.roundRect(4, 4, 56, 56, 14); context.fill();
+    context.fillStyle = "#ffffff"; context.fillRect(18, 18, 11, 11); context.fillRect(35, 18, 11, 11); context.fillRect(18, 35, 11, 11); context.fillRect(35, 35, 11, 11);
+    context.fillStyle = "#ef4444"; context.beginPath(); context.arc(52, 12, 12, 0, Math.PI * 2); context.fill();
+    favicon.href = canvas.toDataURL("image/png");
   }, [unreadMessages]);
 
   function toggleDarkMode() {
@@ -2657,6 +2672,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const activeConversationRef = useRef(activeConversation);
   const hydratedConversationsRef = useRef(new Set<string>());
   const messageLoadsInFlightRef = useRef(new Set<string>());
+  const lastReadReceiptRef = useRef<string | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const typingConversationRef = useRef<string | null>(null);
   const typingActiveRef = useRef(false);
@@ -2832,7 +2848,14 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     const latest = result?.messages?.at(-1);
     if (latest) {
       setConversations((current) => current.map((conversation) => conversation.id === conversationId ? { ...conversation, preview: messagePreview(latest, viewer.access), lastMessageAt: latest.createdAt, unread: false } : conversation));
-      fetch("/api/messages", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId, throughMessageId: latest.id }) }).catch(() => undefined);
+      const latestReceived = [...(result?.messages ?? [])].reverse().find((message) => !message.sentByViewer);
+      const receiptKey = latestReceived ? `${conversationId}:${latestReceived.id}` : null;
+      if (latestReceived && receiptKey !== lastReadReceiptRef.current) {
+        lastReadReceiptRef.current = receiptKey;
+        fetch("/api/messages", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId, throughMessageId: latestReceived.id }) })
+          .then((readResponse) => { if (readResponse.ok) window.setTimeout(() => void loadMessages(), 250); })
+          .catch(() => { lastReadReceiptRef.current = null; });
+      }
     }
     try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`, JSON.stringify(result?.messages ?? [])); } catch { /* storage may be unavailable */ }
     messageLoadsInFlightRef.current.delete(conversationId);
