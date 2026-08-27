@@ -539,8 +539,15 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     if ("Notification" in window) new Notification(notification.title, { body: notification.body || "Open CoreShift to view the latest update.", icon: "/icon-192.png", tag: notification.id });
   }
   async function enablePhoneNotifications() {
+    const isIPhone = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    if (isIPhone && !isInstalled) {
+      setShowInstallHelp(true);
+      flash("On iPhone, install CoreShift to your Home Screen first. Then open the app and enable alerts.");
+      return;
+    }
     if (!phoneNotificationsAvailable) { flash("Phone notifications are not available on this device."); return; }
     if (phoneNotificationPermission === "denied") { flash("Phone notifications are blocked in your browser settings."); return; }
+    if ("serviceWorker" in navigator) await navigator.serviceWorker.register("/sw.js").catch(() => null);
     const permission = phoneNotificationPermission === "granted" ? "granted" : await Notification.requestPermission().catch(() => "denied" as NotificationPermission);
     setPhoneNotificationPermission(permission);
     if (permission !== "granted") { flash("Phone notifications were not enabled."); return; }
@@ -897,9 +904,8 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
                 className="secondary-button"
                 type="button"
                 onClick={phoneNotificationsReady ? disablePhoneNotifications : () => void enablePhoneNotifications()}
-                disabled={!phoneNotificationsAvailable}
               >
-                {phoneNotificationsReady ? "Phone alerts on" : phoneNotificationPermission === "denied" ? "Phone alerts blocked" : "Enable phone alerts"}
+                {phoneNotificationsReady ? "Phone alerts on" : phoneNotificationPermission === "denied" ? "Phone alerts blocked" : phoneNotificationsAvailable ? "Enable phone alerts" : "Set up phone alerts"}
               </button>
               <button className="primary-button" onClick={() => window.dispatchEvent(new Event("coreshift:new-message"))}><span>✎</span>New message</button>
             </div>}
