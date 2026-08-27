@@ -2990,25 +2990,6 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     composer.addEventListener("keydown", handleKeyDown);
     return () => composer.removeEventListener("keydown", handleKeyDown);
   }, [body, busy, imageData, videoKey]);
-  useEffect(() => {
-    const bubbles = listRef.current?.querySelectorAll<HTMLElement>(".message-bubble");
-    if (!bubbles) return;
-    const latestSentIndex = messages.map((message) => message.sentByViewer).lastIndexOf(true);
-    bubbles.forEach((bubble, index) => {
-      const receipt = bubble.querySelector<HTMLElement>(".message-read-receipt");
-      if (!receipt) return;
-      const readers = messages[index]?.readBy ?? [];
-      if (index !== latestSentIndex || readers.length === 0) {
-        receipt.remove();
-        return;
-      }
-      const latestReadAt = Math.max(...readers.map((reader) => reader.readAt));
-      const readTime = new Date(latestReadAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
-      receipt.textContent = `✓✓ Read ${readTime}`;
-      receipt.setAttribute("aria-label", `Read ${readTime} by ${readers.map((reader) => reader.readerName).join(", ")}`);
-      receipt.title = receipt.getAttribute("aria-label") ?? "";
-    });
-  }, [messages]);
   function beginReactionHold(event: React.PointerEvent<HTMLDivElement>, messageId: number) {
     if (event.pointerType === "mouse" && event.button !== 0) return;
     if (reactionHoldRef.current) window.clearTimeout(reactionHoldRef.current.timer);

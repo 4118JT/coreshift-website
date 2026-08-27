@@ -143,7 +143,8 @@ export async function PATCH(request: Request) {
   if (!conversationId || !Number.isInteger(throughMessageId) || throughMessageId < 1) return Response.json({ error: "Invalid read receipt." }, { status: 400 });
   const readerType = viewer.access === "employee" ? "employee" : "owner";
   const readerId = viewer.actorId;
-  await database().prepare(`INSERT OR IGNORE INTO message_reads (message_id, business_id, reader_type, reader_id, reader_name, read_at) SELECT id, business_id, ?, ?, ?, ? FROM messages WHERE business_id = ? AND conversation_id = ? AND id <= ? AND NOT (sender_type = ? AND sender_id = ?)`).bind(readerType, readerId, viewer.displayName, Date.now(), viewer.businessId, conversationId, throughMessageId, readerType, readerId).run();
+  const readAt = Date.now();
+  await database().prepare(`INSERT INTO message_reads (message_id, business_id, reader_type, reader_id, reader_name, read_at) SELECT id, business_id, ?, ?, ?, ? FROM messages WHERE business_id = ? AND conversation_id = ? AND id <= ? AND NOT (sender_type = ? AND sender_id = ?) ON CONFLICT(message_id, reader_type, reader_id) DO UPDATE SET reader_name = excluded.reader_name, read_at = excluded.read_at`).bind(readerType, readerId, viewer.displayName, readAt, viewer.businessId, conversationId, throughMessageId, readerType, readerId).run();
   return Response.json({ ok: true });
 }
 
