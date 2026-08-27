@@ -611,7 +611,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   }, [isEmployee, phoneNotificationKey, phoneNotificationsReady, view, viewer.access, viewer.employeeId]);
 
   useEffect(() => {
-    if (!messagingAllowed || isDemo) { setUnreadMessages(0); return; }
+    if (!messagingAllowed) { setUnreadMessages(0); return; }
     const loadUnreadMessages = async () => {
       const response = await fetch("/api/messages?list=1", { cache: "no-store" }).catch(() => null);
       const result = response?.ok ? await response.json().catch(() => null) as { recentConversations?: Array<{ id: string; unread?: number | boolean }> } | null : null;
@@ -622,7 +622,19 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     const timer = window.setInterval(loadUnreadMessages, 2000);
     window.addEventListener("focus", loadUnreadMessages);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", loadUnreadMessages); };
-  }, [isDemo, messagingAllowed, viewer.businessId, viewer.actorId]);
+  }, [messagingAllowed, viewer.businessId, viewer.actorId]);
+  useEffect(() => {
+    if (!messagingAllowed || typeof BroadcastChannel === "undefined") return;
+    const channel = new BroadcastChannel(`coreshift-messages:${viewer.businessId}`);
+    const refreshUnread = () => {
+      fetch("/api/messages?list=1", { cache: "no-store" })
+        .then((response) => response.ok ? response.json() as Promise<{ recentConversations?: Array<{ unread?: number | boolean }> }> : null)
+        .then((result) => { if (result?.recentConversations) setUnreadMessages(result.recentConversations.reduce((total, conversation) => total + Math.max(0, Number(conversation.unread) || 0), 0)); })
+        .catch(() => undefined);
+    };
+    channel.addEventListener("message", refreshUnread);
+    return () => { channel.removeEventListener("message", refreshUnread); channel.close(); };
+  }, [messagingAllowed, viewer.businessId]);
   useEffect(() => {
     defaultDocumentTitle.current ??= document.title;
     document.title = unreadMessages > 0
@@ -2963,7 +2975,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, imageData, imageName, videoKey, videoName, conversationId: activeConversation, replyToId: replyingTo?.id }) }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as WorkspaceMessage & { error?: string } | null : null;
     setBusy(false); if (!response?.ok) { setError(result?.error ?? "Message could not be sent."); return; }
-    if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); }
+    if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); try { const updateChannel = new BroadcastChannel(`coreshift-messages:${viewer.businessId}`); updateChannel.postMessage({ type: "new-message", conversationId: activeConversation }); updateChannel.close(); } catch { /* polling remains the cross-device fallback */ } }
     stopTyping(activeConversation);
     setBody(""); setImageData(null); setImageName(""); setVideoKey(null); setVideoName(""); setReplyingTo(null);
   }
