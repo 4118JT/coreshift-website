@@ -2904,6 +2904,22 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     return () => { if (typeof idle === "number") window.clearTimeout(idle); };
   }, [conversations.length]);
   useEffect(() => { if (listRef.current) listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [messages.length, typingPeople.length]);
+  useEffect(() => {
+    const receipts = listRef.current?.querySelectorAll<HTMLElement>(".message-read-receipt");
+    if (!receipts) return;
+    let receiptIndex = 0;
+    messages.forEach((message) => {
+      if (!message.sentByViewer) return;
+      const receipt = receipts[receiptIndex++];
+      const readers = message.readBy ?? [];
+      if (!receipt || !readers.length) return;
+      const latestReadAt = Math.max(...readers.map((reader) => reader.readAt));
+      const readTime = new Date(latestReadAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      receipt.textContent = `✓✓ Read ${readTime}`;
+      receipt.title = `Read ${readTime} by ${readers.map((reader) => reader.readerName).join(", ")}`;
+      receipt.setAttribute("aria-label", receipt.title);
+    });
+  }, [messages]);
   useEffect(() => { const openComposer = () => { setComposeMode("direct"); setComposeOpen(true); }; window.addEventListener("coreshift:new-message", openComposer); return () => window.removeEventListener("coreshift:new-message", openComposer); }, []);
   useEffect(() => {
     stopTyping();

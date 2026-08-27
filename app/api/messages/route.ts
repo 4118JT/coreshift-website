@@ -29,9 +29,9 @@ function readReceiptLabel(readerName: string, readAt: number) {
 }
 
 function summarizeReadReceipts(receipts: Array<{ readerType: string; readerId: number; readerName: string; readAt: number }>) {
-  if (receipts.length <= 2) return receipts.map((receipt) => ({ ...receipt, readerName: readReceiptLabel(receipt.readerName, receipt.readAt) }));
+  if (receipts.length <= 2) return receipts;
   const latest = receipts[receipts.length - 1];
-  return [{ ...latest, readerName: `${receipts.length} people, latest ${readReceiptTimeLabel(latest.readAt)}` }];
+  return [{ ...latest, readerName: `${receipts.length} people` }];
 }
 
 export async function GET(request: Request) {
