@@ -5,11 +5,9 @@ import { useEffect } from "react";
 export function PwaRegister() {
   useEffect(() => {
     if ("serviceWorker" in navigator) {
-      // Replace any older cached shell so dashboard layout updates are visible
-      // immediately on phones that have installed CoreShift as a PWA.
-      navigator.serviceWorker.getRegistrations()
-        .then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())))
-        .then(() => navigator.serviceWorker.register("/sw.js?v=4"))
+      // Keep the existing worker alive. Unregistering it on every app visit can
+      // leave a short period with no active notification provider.
+      navigator.serviceWorker.register("/sw.js?v=5")
         .catch(() => undefined);
     }
   }, []);

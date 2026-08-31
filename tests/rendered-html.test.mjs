@@ -224,7 +224,7 @@ test("ships isolated CoreShift business accounts with owner payment tracking", a
   assert.match(profileMigration, /ADD .created_at./);
   assert.match(profileMigration, /UPDATE employees\s+SET created_at/);
   assert.match(layout, /CoreShift — Simple employee time tracking/);
-  assert.match(serviceWorker, /coreshift-shell-v1/);
+  assert.match(serviceWorker, /coreshift-shell-v5/);
   assert.match(serviceWorker, /APP_SHELL\.includes\(url\.pathname\)/);
   assert.doesNotMatch(serviceWorker, /cache\.put\(event\.request/);
   assert.ok(preview.byteLength > 100_000);

@@ -15,6 +15,10 @@ async function access() {
   return { viewer, enabled: setting?.value !== "false" };
 }
 
+function canAccessConversation(viewer: Awaited<ReturnType<typeof getViewer>>, conversationId: string) {
+  return viewer.access !== "employee" || conversationId === `direct-${viewer.employeeId}` || conversationId.startsWith("group-");
+}
+
 function readReceiptTimeLabel(readAt: number) {
   const date = new Date(readAt);
   const now = new Date();
@@ -53,17 +57,19 @@ export async function GET(request: Request) {
   }
   const viewerType = viewer.access === "employee" ? "employee" : "owner";
   const viewerId = viewer.actorId;
+  const employeeConversationId = viewer.access === "employee" ? `direct-${viewer.employeeId}` : null;
   const now = Date.now();
   const isSentByViewer = (message: { senderType: string; senderId: number; senderName: string }) => message.senderType === viewerType && (message.senderId === viewerId || (viewerType === "owner" && message.senderId === 0 && message.senderName === viewer.displayName));
   if (url.searchParams.get("list") === "1") {
     const [recent, online] = await Promise.all([
-      database().prepare(`SELECT m.conversation_id AS id, m.sender_type AS senderType, m.sender_id AS senderId, m.sender_name AS senderName, m.body, m.image_data AS imageData, m.created_at AS lastMessageAt, (SELECT COUNT(*) FROM messages unread_message WHERE unread_message.business_id = m.business_id AND unread_message.conversation_id = m.conversation_id AND NOT (unread_message.sender_type = ? AND unread_message.sender_id = ?) AND NOT EXISTS (SELECT 1 FROM message_reads mr WHERE mr.message_id = unread_message.id AND mr.reader_type = ? AND mr.reader_id = ?)) AS unread FROM messages m WHERE m.business_id = ? AND m.id = (SELECT newest.id FROM messages newest WHERE newest.business_id = m.business_id AND newest.conversation_id = m.conversation_id ORDER BY newest.created_at DESC, newest.id DESC LIMIT 1) ORDER BY m.created_at DESC, m.id DESC LIMIT 100`).bind(viewerType, viewerId, viewerType, viewerId, viewer.businessId).all(),
+      database().prepare(`SELECT m.conversation_id AS id, m.sender_type AS senderType, m.sender_id AS senderId, m.sender_name AS senderName, m.body, m.image_data AS imageData, m.created_at AS lastMessageAt, (SELECT COUNT(*) FROM messages unread_message WHERE unread_message.business_id = m.business_id AND unread_message.conversation_id = m.conversation_id AND NOT (unread_message.sender_type = ? AND unread_message.sender_id = ?) AND NOT EXISTS (SELECT 1 FROM message_reads mr WHERE mr.message_id = unread_message.id AND mr.reader_type = ? AND mr.reader_id = ?)) AS unread FROM messages m WHERE m.business_id = ? ${employeeConversationId ? "AND (m.conversation_id = ? OR m.conversation_id LIKE 'group-%')" : ""} AND m.id = (SELECT newest.id FROM messages newest WHERE newest.business_id = m.business_id AND newest.conversation_id = m.conversation_id ORDER BY newest.created_at DESC, newest.id DESC LIMIT 1) ORDER BY m.created_at DESC, m.id DESC LIMIT 100`).bind(viewerType, viewerId, viewerType, viewerId, viewer.businessId, ...(employeeConversationId ? [employeeConversationId] : [])).all(),
       database().prepare("SELECT user_type AS userType, user_id AS userId, user_name AS userName, last_seen AS lastSeen FROM message_presence WHERE business_id = ?").bind(viewer.businessId).all(),
     ]);
     const recentConversations = (recent.results as Array<{ senderType: string; senderId: number; senderName: string }>).map((conversation) => ({ ...conversation, sentByViewer: isSentByViewer(conversation) }));
     return Response.json({ enabled: true, recentConversations, onlinePeople: online.results }, { headers: { "cache-control": "private, no-store" } });
   }
   const conversationId = url.searchParams.get("conversationId") || "managers";
+  if (!canAccessConversation(viewer, conversationId)) return Response.json({ error: "Not authorized for this conversation." }, { status: 403 });
   const [rows, reactionRows, readRows, typingRows] = await Promise.all([
     database().prepare(`SELECT recent.id, recent.sender_type AS senderType, recent.sender_id AS senderId, recent.sender_name AS senderName, recent.body, recent.image_data AS imageData, recent.image_name AS imageName, recent.created_at AS createdAt, recent.reply_to_id AS replyToId, parent.sender_name AS replySenderName, parent.body AS replyBody FROM (SELECT id, sender_type, sender_id, sender_name, body, image_data, image_name, created_at, reply_to_id FROM messages WHERE business_id = ? AND conversation_id = ? ORDER BY created_at DESC, id DESC LIMIT 100) recent LEFT JOIN messages parent ON parent.id = recent.reply_to_id AND parent.business_id = ? ORDER BY recent.created_at ASC, recent.id ASC`).bind(viewer.businessId, conversationId, viewer.businessId).all(),
     database().prepare(`SELECT mr.message_id AS messageId, mr.emoji, COUNT(*) AS count, MAX(CASE WHEN mr.reactor_type = ? AND mr.reactor_id = ? THEN 1 ELSE 0 END) AS reactedByViewer FROM message_reactions mr JOIN messages m ON m.id = mr.message_id WHERE mr.business_id = ? AND m.conversation_id = ? GROUP BY mr.message_id, mr.emoji`).bind(viewerType, viewerId, viewer.businessId, conversationId).all<{ messageId: number; emoji: string; count: number; reactedByViewer: number }>(),
@@ -109,6 +115,7 @@ export async function POST(request: Request) {
   const senderId = viewer.actorId;
   const createdAt = Date.now();
   const conversationId = body.conversationId?.trim().slice(0, 120) || "managers";
+  if (!canAccessConversation(viewer, conversationId)) return Response.json({ error: "Not authorized for this conversation." }, { status: 403 });
   const requestedReplyId = Number(body.replyToId);
   const replyTo = Number.isInteger(requestedReplyId) && requestedReplyId > 0
     ? await database().prepare("SELECT id, sender_name AS senderName, body FROM messages WHERE id = ? AND business_id = ? AND conversation_id = ?").bind(requestedReplyId, viewer.businessId, conversationId).first<{ id: number; senderName: string; body: string }>()
@@ -131,6 +138,7 @@ export async function PATCH(request: Request) {
   if (body.action === "typing") {
     const conversationId = body.conversationId?.trim().slice(0, 120);
     if (!conversationId) return Response.json({ error: "Invalid typing state." }, { status: 400 });
+    if (!canAccessConversation(viewer, conversationId)) return Response.json({ error: "Not authorized for this conversation." }, { status: 403 });
     const userType = viewer.access === "employee" ? "employee" : "owner";
     const userId = viewer.actorId;
     const now = Date.now();
@@ -141,6 +149,7 @@ export async function PATCH(request: Request) {
   const conversationId = body.conversationId?.trim().slice(0, 120);
   const throughMessageId = Number(body.throughMessageId);
   if (!conversationId || !Number.isInteger(throughMessageId) || throughMessageId < 1) return Response.json({ error: "Invalid read receipt." }, { status: 400 });
+  if (!canAccessConversation(viewer, conversationId)) return Response.json({ error: "Not authorized for this conversation." }, { status: 403 });
   const readerType = viewer.access === "employee" ? "employee" : "owner";
   const readerId = viewer.actorId;
   await database().prepare(`INSERT OR IGNORE INTO message_reads (message_id, business_id, reader_type, reader_id, reader_name, read_at) SELECT id, business_id, ?, ?, ?, ? FROM messages WHERE business_id = ? AND conversation_id = ? AND id <= ? AND NOT (sender_type = ? AND sender_id = ?)`).bind(readerType, readerId, viewer.displayName, Date.now(), viewer.businessId, conversationId, throughMessageId, readerType, readerId).run();

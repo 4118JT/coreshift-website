@@ -29,7 +29,8 @@ export async function GET() {
 
   const viewerType = viewer.access === "employee" ? "employee" : "owner";
   const viewerId = viewer.actorId;
-  const messages = await db.prepare(`SELECT id, sender_type AS senderType, sender_id AS senderId, sender_name AS senderName, body, created_at AS createdAt FROM messages WHERE business_id = ? ORDER BY created_at DESC, id DESC LIMIT 20`).bind(viewer.businessId).all<{ id: number; senderType: string; senderId: number; senderName: string; body: string; createdAt: number }>();
+  const employeeConversationId = viewer.access === "employee" ? `direct-${viewer.employeeId}` : null;
+  const messages = await db.prepare(`SELECT id, sender_type AS senderType, sender_id AS senderId, sender_name AS senderName, body, created_at AS createdAt FROM messages WHERE business_id = ? ${employeeConversationId ? "AND (conversation_id = ? OR conversation_id LIKE 'group-%')" : ""} ORDER BY created_at DESC, id DESC LIMIT 20`).bind(viewer.businessId, ...(employeeConversationId ? [employeeConversationId] : [])).all<{ id: number; senderType: string; senderId: number; senderName: string; body: string; createdAt: number }>();
   for (const message of messages.results) {
     if (message.senderType === viewerType && message.senderId === viewerId) continue;
     notifications.push({ id: `message:${message.id}`, type: "message", title: `Message from ${message.senderName}`, body: message.body || "Sent a photo.", createdAt: message.createdAt });

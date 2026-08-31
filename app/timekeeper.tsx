@@ -99,6 +99,10 @@ type PaymentDetail = {
 type AppNotification = { id: string; type: "payment" | "schedule" | "message"; title: string; body: string; createdAt: number };
 type PhoneNotificationPermission = NotificationPermission | "unsupported";
 
+function accountStorageScope(viewer: Viewer) {
+  return [viewer.businessId ?? "pending", viewer.access, viewer.actorId, viewer.email ?? "unknown"].map((part) => encodeURIComponent(String(part))).join(":");
+}
+
 type ScheduledPayment = {
   id: number;
   amountCents: number;
@@ -471,7 +475,9 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   // Keep the overview data path explicit so the server render and client render use the same inputs.
   const isEmployee = viewer.access === "employee";
   const isDemo = viewer.businessId === "__coreshift_demo__";
-  const phoneNotificationKey = `coreshift-phone-notifications:${viewer.businessId}:${viewer.actorId}`;
+  const accountScope = accountStorageScope(viewer);
+  const phoneNotificationKey = `coreshift-phone-notifications:${accountScope}`;
+  const employeeNotificationPreferencesKey = `coreshift-employee-notifications:${accountScope}`;
   const [employees, setEmployees] = useState(isEmployee ? [] : fallbackEmployees);
   const [now, setNow] = useState(new Date());
   const [showAll, setShowAll] = useState(false);
@@ -499,6 +505,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const [scheduleNewShiftTick, setScheduleNewShiftTick] = useState(0);
   const knownNotificationIdsRef = useRef(new Set<string>());
   const loadedNotificationsRef = useRef(false);
+  const notificationLoadInFlightRef = useRef(false);
   const working = useMemo(() => employees.filter((person) => person.status === "clocked_in"), [employees]);
   // Keep the employee clock usable during the brief API load (and on slower
   // mobile connections) by using the signed-in employee identity immediately.
@@ -519,8 +526,12 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const viewerRole = isEmployee ? (employees.find((person) => person.id === viewer.employeeId)?.role || "Employee") : "Owner";
   const phoneNotificationsAvailable = phoneNotificationPermission !== "unsupported";
   const phoneNotificationsReady = phoneNotificationsEnabled && phoneNotificationPermission === "granted";
+  const phoneNotificationsReadyRef = useRef(phoneNotificationsReady);
+  const activeViewRef = useRef(view);
+  phoneNotificationsReadyRef.current = phoneNotificationsReady;
+  activeViewRef.current = view;
   async function showPhoneNotification(notification: AppNotification) {
-    if (!phoneNotificationsReady) return;
+    if (!phoneNotificationsReadyRef.current) return;
     const href = notification.type === "message" ? "/messages" : notification.type === "schedule" ? (isEmployee ? "/my-schedule" : "/schedule") : isEmployee ? "/profile" : "/payroll";
     if ("serviceWorker" in navigator) {
       const registration = await navigator.serviceWorker.ready.catch(() => null);
@@ -585,37 +596,74 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     loadedNotificationsRef.current = false;
     knownNotificationIdsRef.current = new Set();
     const loadNotifications = async () => {
-      const response = await fetch("/api/notifications").catch(() => null);
-      if (!response?.ok) return;
-      const result = await response.json().catch(() => null) as { notifications?: AppNotification[] } | null;
-      const preferences = viewer.access === "employee" ? JSON.parse(window.localStorage.getItem("coreshift-employee-notifications") || "{}") as { schedule?: boolean; reminders?: boolean; messages?: boolean; payments?: boolean } : {};
-      const visible = (result?.notifications ?? []).filter((item) => item.type === "schedule" ? preferences.schedule !== false : item.type === "message" ? preferences.messages !== false : preferences.payments !== false);
-      const newNotifications = visible.filter((item) => !knownNotificationIdsRef.current.has(item.id));
-      knownNotificationIdsRef.current = new Set(visible.map((item) => item.id));
-      setNotifications(visible);
-      const seenKey = `coreshift-notifications-seen:${viewer.employeeId ?? "owner"}`;
-      const seen = Number(window.localStorage.getItem(seenKey) || 0);
-      setUnreadNotifications(visible.filter((item) => item.createdAt > seen).length);
-      if (!loadedNotificationsRef.current) {
-        loadedNotificationsRef.current = true;
-        return;
-      }
-      if (!phoneNotificationsReady) return;
-      for (const notification of newNotifications) {
-        if (notification.type !== "message") continue;
-        if (document.visibilityState === "visible" && view === "messages") continue;
-        await showPhoneNotification(notification);
+      // Timers can overlap on a slow connection. Keep responses ordered so a
+      // late request cannot replace the IDs from a newer notification check.
+      if (notificationLoadInFlightRef.current) return;
+      notificationLoadInFlightRef.current = true;
+      try {
+        const response = await fetch("/api/notifications", { cache: "no-store" }).catch(() => null);
+        if (!response?.ok) return;
+        const result = await response.json().catch(() => null) as { notifications?: AppNotification[] } | null;
+        const preferences = viewer.access === "employee" ? JSON.parse(window.localStorage.getItem(employeeNotificationPreferencesKey) || "{}") as { schedule?: boolean; reminders?: boolean; messages?: boolean; payments?: boolean } : {};
+        const visible = (result?.notifications ?? []).filter((item) => item.type === "schedule" ? preferences.schedule !== false : item.type === "message" ? preferences.messages !== false : preferences.payments !== false);
+        const newNotifications = visible.filter((item) => !knownNotificationIdsRef.current.has(item.id));
+        knownNotificationIdsRef.current = new Set(visible.map((item) => item.id));
+        setNotifications(visible);
+        const seenKey = `coreshift-notifications-seen:${accountScope}`;
+        const seen = Number(window.localStorage.getItem(seenKey) || 0);
+        setUnreadNotifications(visible.filter((item) => item.createdAt > seen).length);
+        if (!loadedNotificationsRef.current) {
+          loadedNotificationsRef.current = true;
+          return;
+        }
+        if (!phoneNotificationsReadyRef.current) return;
+        for (const notification of newNotifications) {
+          if (notification.type !== "message") continue;
+          if (document.visibilityState === "visible" && activeViewRef.current === "messages") continue;
+          await showPhoneNotification(notification);
+        }
+      } finally {
+        notificationLoadInFlightRef.current = false;
       }
     };
     loadNotifications();
-    const notificationTimer = window.setInterval(loadNotifications, 20000);
+    // A message sent from another open CoreShift session is checked straight
+    // away; polling remains the fallback for different devices.
+    const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(`coreshift-messages:${viewer.businessId}`);
+    const refreshNotifications = () => { void loadNotifications(); };
+    const refreshFromNewMessage = (event: MessageEvent<{ type?: string; notification?: AppNotification; senderType?: "owner" | "employee"; senderId?: number }>) => {
+      const notification = event.data?.type === "new-message" ? event.data.notification : undefined;
+      const viewerType = viewer.access === "employee" ? "employee" : "owner";
+      const sentByViewer = event.data?.senderType === viewerType && event.data?.senderId === viewer.actorId;
+      const preferences = viewer.access === "employee" ? JSON.parse(window.localStorage.getItem(employeeNotificationPreferencesKey) || "{}") as { messages?: boolean } : {};
+      if (notification && !sentByViewer && preferences.messages !== false) {
+        // The sender broadcasts this only after the database accepts the
+        // message, so open sessions can alert without waiting for a poll.
+        knownNotificationIdsRef.current.add(notification.id);
+        setNotifications((current) => [notification, ...current.filter((item) => item.id !== notification.id)].slice(0, 30));
+        setUnreadNotifications((current) => current + 1);
+        if (!(document.visibilityState === "visible" && activeViewRef.current === "messages")) void showPhoneNotification(notification);
+      }
+      refreshNotifications();
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refreshNotifications();
+    };
+    channel?.addEventListener("message", refreshFromNewMessage);
+    window.addEventListener("focus", refreshNotifications);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    const notificationTimer = window.setInterval(loadNotifications, 10000);
     const dataTimer = window.setInterval(() => refreshEmployees(), 30000);
     return () => {
       window.clearInterval(timer);
       window.clearInterval(notificationTimer);
       window.clearInterval(dataTimer);
+      channel?.removeEventListener("message", refreshFromNewMessage);
+      channel?.close();
+      window.removeEventListener("focus", refreshNotifications);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [isEmployee, phoneNotificationKey, phoneNotificationsReady, view, viewer.access, viewer.employeeId]);
+  }, [accountScope, employeeNotificationPreferencesKey, isEmployee, phoneNotificationKey, viewer.access, viewer.businessId, viewer.employeeId]);
 
   useEffect(() => {
     if (!messagingAllowed) { setUnreadMessages(0); return; }
@@ -677,7 +725,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     setNotificationOpen((open) => !open);
     const newest = notifications[0]?.createdAt;
     if (newest) {
-      window.localStorage.setItem(`coreshift-notifications-seen:${viewer.employeeId ?? "owner"}`, String(newest));
+      window.localStorage.setItem(`coreshift-notifications-seen:${accountScope}`, String(newest));
       setUnreadNotifications(0);
     }
   }
@@ -2612,7 +2660,7 @@ type AiMessage = {
   content: string;
 };
 
-type WorkspaceMessage = { id: number; conversationId?: string; senderType: "owner" | "employee"; senderId: number; senderName: string; body: string; imageData?: string | null; imageName?: string | null; createdAt: number; sentByViewer?: boolean; replyTo?: { id: number; senderName: string; body: string } | null; reactions?: Array<{ emoji: string; count: number; reactedByViewer: boolean }>; readBy?: Array<{ readerType: string; readerId: number; readerName: string; readAt: number }> };
+type WorkspaceMessage = { id: number; conversationId?: string; senderType: "owner" | "employee"; senderId: number; senderName: string; body: string; imageData?: string | null; imageName?: string | null; createdAt: number; sentByViewer?: boolean; pending?: boolean; replyTo?: { id: number; senderName: string; body: string } | null; reactions?: Array<{ emoji: string; count: number; reactedByViewer: boolean }>; readBy?: Array<{ readerType: string; readerId: number; readerName: string; readAt: number }> };
 
 const MESSAGE_REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"] as const;
 
@@ -2657,6 +2705,7 @@ function messageSentTime(timestamp?: number) {
 }
 
 function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[] }) {
+  const accountScope = accountStorageScope(viewer);
   const [messages, setMessages] = useState<WorkspaceMessage[]>([]);
   const [activeConversation, setActiveConversation] = useState(viewer.access === "employee" && viewer.employeeId ? `direct-${viewer.employeeId}` : "");
   const [conversationFilter, setConversationFilter] = useState<"all" | "direct" | "groups" | "unread">("all");
@@ -2742,8 +2791,8 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     else setSwipingId(null);
   }
   useEffect(() => {
-    try { setOwnerPhoto(window.localStorage.getItem("coreshift-owner-photo")); } catch { /* storage may be unavailable */ }
-  }, []);
+    try { setOwnerPhoto(window.localStorage.getItem(`coreshift-owner-photo:${viewer.businessId}`)); } catch { /* storage may be unavailable */ }
+  }, [viewer.businessId]);
   useEffect(() => {
     const picker = document.querySelector<HTMLInputElement>(".message-photo-input");
     if (picker) picker.accept = "image/*,video/mp4,video/quicktime,video/x-m4v,video/3gpp";
@@ -2810,17 +2859,17 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   };
   useEffect(() => {
     try {
-      const saved = JSON.parse(window.localStorage.getItem(`coreshift-conversations:${viewer.businessId}:${viewer.actorId}`) ?? "[]") as typeof conversations;
+      const saved = JSON.parse(window.localStorage.getItem(`coreshift-conversations:${accountScope}`) ?? "[]") as typeof conversations;
       if (Array.isArray(saved)) setConversations((current) => [...current, ...saved.filter((item) => item?.id && item.id !== "managers" && !current.some((existing) => existing.id === item.id))].sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name)));
     } catch { /* keep the default conversation */ }
   }, []);
-  useEffect(() => { try { window.localStorage.setItem(`coreshift-conversations:${viewer.businessId}:${viewer.actorId}`, JSON.stringify(conversations)); } catch { /* storage may be unavailable */ } }, [conversations]);
+  useEffect(() => { try { window.localStorage.setItem(`coreshift-conversations:${accountScope}`, JSON.stringify(conversations)); } catch { /* storage may be unavailable */ } }, [accountScope, conversations]);
   // Restore previews from the local cache without making one network request
   // per conversation. The active thread is refreshed in the background below.
   useEffect(() => {
     setConversations((current) => current.map((conversation) => {
       try {
-        const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversation.id}`) ?? "null") as WorkspaceMessage[] | null;
+        const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${accountScope}:${conversation.id}`) ?? "null") as WorkspaceMessage[] | null;
         const latest = cached?.at(-1);
         return latest ? { ...conversation, preview: messagePreview(latest, viewer.access), lastMessageAt: latest.createdAt } : conversation;
       } catch { return conversation; }
@@ -2854,7 +2903,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     if (!hydratedConversationsRef.current.has(conversationId)) {
       hydratedConversationsRef.current.add(conversationId);
       try {
-        const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`) ?? "null") as WorkspaceMessage[] | null;
+        const cached = JSON.parse(window.localStorage.getItem(`coreshift-messages:${accountScope}:${conversationId}`) ?? "null") as WorkspaceMessage[] | null;
         if (Array.isArray(cached)) { setMessages(cached); setLoading(false); }
       } catch { /* use the server copy */ }
     }
@@ -2875,14 +2924,14 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
           .catch(() => { lastReadReceiptRef.current = null; });
       }
     }
-    try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`, JSON.stringify(result?.messages ?? [])); } catch { /* storage may be unavailable */ }
+    try { window.localStorage.setItem(`coreshift-messages:${accountScope}:${conversationId}`, JSON.stringify(result?.messages ?? [])); } catch { /* storage may be unavailable */ }
     messageLoadsInFlightRef.current.delete(conversationId);
   }
   function prefetchConversation(conversationId: string) {
-    if (typeof window === "undefined" || window.localStorage.getItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`)) return;
+    if (typeof window === "undefined" || window.localStorage.getItem(`coreshift-messages:${accountScope}:${conversationId}`)) return;
     fetch(`/api/messages?conversationId=${encodeURIComponent(conversationId)}`, { cache: "default" })
       .then((response) => response.ok ? response.json() as Promise<{ messages?: WorkspaceMessage[] }> : null)
-      .then((result) => { if (result?.messages) window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${conversationId}`, JSON.stringify(result.messages)); })
+      .then((result) => { if (result?.messages) window.localStorage.setItem(`coreshift-messages:${accountScope}:${conversationId}`, JSON.stringify(result.messages)); })
       .catch(() => undefined);
   }
   useEffect(() => {
@@ -2993,13 +3042,35 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     setVideoKey(result.key); setVideoName(file.name.slice(0, 120)); setImageData(null); setImageName(""); composerRef.current?.focus();
   }
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault(); if ((!body.trim() && !imageData && !videoKey) || busy) return; setBusy(true); setError("");
-    const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body, imageData, imageName, videoKey, videoName, conversationId: activeConversation, replyToId: replyingTo?.id }) }).catch(() => null);
-    const result = response ? await response.json().catch(() => null) as WorkspaceMessage & { error?: string } | null : null;
-    setBusy(false); if (!response?.ok) { setError(result?.error ?? "Message could not be sent."); return; }
-    if (result) { setMessages((current) => { const next = [...current, result]; try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ } return next; }); setConversations((current) => current.map((conversation) => conversation.id === activeConversation ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation)); try { const updateChannel = new BroadcastChannel(`coreshift-messages:${viewer.businessId}`); updateChannel.postMessage({ type: "new-message", conversationId: activeConversation }); updateChannel.close(); } catch { /* polling remains the cross-device fallback */ } }
-    stopTyping(activeConversation);
+    event.preventDefault(); if ((!body.trim() && !imageData && !videoKey) || busy) return;
+    const outgoing = { body, imageData, imageName, videoKey, videoName, conversationId: activeConversation, replyTo: replyingTo };
+    const temporaryId = -Date.now();
+    const optimistic: WorkspaceMessage = { id: temporaryId, conversationId: outgoing.conversationId, senderType: viewer.access === "employee" ? "employee" : "owner", senderId: viewer.actorId, senderName: viewer.displayName, body: outgoing.body.trim(), imageData: outgoing.videoKey ? `video:${outgoing.videoKey}` : outgoing.imageData, imageName: outgoing.imageData ? outgoing.imageName : outgoing.videoKey ? outgoing.videoName : null, createdAt: Date.now(), sentByViewer: true, pending: true, replyTo: outgoing.replyTo ? { id: outgoing.replyTo.id, senderName: outgoing.replyTo.senderName, body: outgoing.replyTo.body } : null };
+    setBusy(true); setError("");
+    setMessages((current) => [...current, optimistic]);
+    setConversations((current) => current.map((conversation) => conversation.id === outgoing.conversationId ? { ...conversation, preview: messagePreview(optimistic, viewer.access), lastMessageAt: optimistic.createdAt } : conversation));
     setBody(""); setImageData(null); setImageName(""); setVideoKey(null); setVideoName(""); setReplyingTo(null);
+    const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body: outgoing.body, imageData: outgoing.imageData, imageName: outgoing.imageName, videoKey: outgoing.videoKey, videoName: outgoing.videoName, conversationId: outgoing.conversationId, replyToId: outgoing.replyTo?.id }) }).catch(() => null);
+    const result = response ? await response.json().catch(() => null) as WorkspaceMessage & { error?: string } | null : null;
+    setBusy(false);
+    if (!response?.ok || !result) {
+      setMessages((current) => current.filter((message) => message.id !== temporaryId));
+      setBody((current) => current || outgoing.body); setImageData((current) => current || outgoing.imageData); setImageName((current) => current || outgoing.imageName); setVideoKey((current) => current || outgoing.videoKey); setVideoName((current) => current || outgoing.videoName); setReplyingTo((current) => current || outgoing.replyTo);
+      setError(result?.error ?? "Message could not be sent.");
+      return;
+    }
+    setMessages((current) => {
+      const next = current.map((message) => message.id === temporaryId ? result : message);
+      try { window.localStorage.setItem(`coreshift-messages:${accountScope}:${outgoing.conversationId}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ }
+      return next;
+    });
+    setConversations((current) => current.map((conversation) => conversation.id === outgoing.conversationId ? { ...conversation, preview: messagePreview(result, viewer.access), lastMessageAt: result.createdAt } : conversation));
+    try {
+      const updateChannel = new BroadcastChannel(`coreshift-messages:${viewer.businessId}`);
+      updateChannel.postMessage({ type: "new-message", conversationId: outgoing.conversationId, notification: { id: `message:${result.id}`, type: "message", title: `Message from ${result.senderName}`, body: result.body || "Sent a photo.", createdAt: result.createdAt }, senderType: result.senderType, senderId: result.senderId });
+      updateChannel.close();
+    } catch { /* polling remains the cross-device fallback */ }
+    stopTyping(outgoing.conversationId);
   }
   useEffect(() => {
     const composer = composerRef.current;
@@ -3049,7 +3120,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
         else reactions.push({ emoji, count: Number(result.count), reactedByViewer: result.active });
         return { ...message, reactions };
       });
-      try { window.localStorage.setItem(`coreshift-messages:${viewer.businessId}:${viewer.actorId}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ }
+      try { window.localStorage.setItem(`coreshift-messages:${accountScope}:${activeConversation}`, JSON.stringify(next)); } catch { /* storage may be unavailable */ }
       return next;
     });
   }
@@ -3090,7 +3161,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   };
   const typingSummary = typingPeople.length === 0 ? "" : typingPeople.length === 1 ? `${typingPeople[0].userName} is typing...` : typingPeople.length === 2 ? `${typingPeople[0].userName} and ${typingPeople[1].userName} are typing...` : `${typingPeople.length} people are typing...`;
   const createConversation = (event: FormEvent) => { event.preventDefault(); const name = composeMode === "group" ? composeName.trim() : employees.find((employee) => employee.id === composeMembers[0])?.name; if (!name || (composeMode === "group" && composeMembers.length < 2)) return; const conversation = { id: composeMode === "direct" ? `direct-${composeMembers[0]}` : `group-${Date.now()}`, name, kind: composeMode, memberCount: composeMode === "group" ? composeMembers.length + 1 : 2, unread: false }; setConversations((current) => (current.some((item) => item.id === conversation.id) ? current : [...current, conversation]).sort((a, b) => b.memberCount - a.memberCount || a.name.localeCompare(b.name))); setActiveConversation(conversation.id); setMessages([]); setComposeOpen(false); setComposeName(""); setComposeMembers([]); };
-  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className={`conversation-avatar ${isConversationOnline(conversation) ? "online" : ""}`}>{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p>{conversation.kind === "direct" && <small className="conversation-presence-label">{conversationPresenceText(conversation)}</small>}</div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className={`conversation-avatar large ${isConversationOnline(active) ? "online" : ""}`}>{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small className={typingSummary ? "typing-status" : undefined}>{typingSummary || (active?.kind === "group" ? `Group conversation - ${messages.length || employees.length} members` : active ? conversationPresenceText(active) : "Swipe right on a conversation to archive it")}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message, index) => { const previousMessage = messages[index - 1]; const grouped = Boolean(previousMessage && previousMessage.senderType === message.senderType && previousMessage.senderId === message.senderId); const readNames = [...new Set((message.readBy ?? []).map((receipt) => receipt.readerName))]; const videoKey = messageVideoKey(message); return <div className={`message-bubble ${message.sentByViewer ? "mine" : ""} ${grouped ? "grouped" : ""}`} key={message.id} onPointerDown={(event) => beginReactionHold(event, message.id)} onPointerMove={moveReactionHold} onPointerUp={endReactionHold} onPointerCancel={endReactionHold} onPointerLeave={endReactionHold} onContextMenu={(event) => { event.preventDefault(); setReactionMessageId(message.id); }} title="Press and hold for message options">{!grouped && <div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}</div>}{message.replyTo && <div className="message-reply-quote"><strong>Replying to {message.replyTo.senderName}</strong><span>{message.replyTo.body}</span></div>}{videoKey ? <video className="message-photo" controls preload="metadata" src={messageVideoUrl(videoKey)}>Your browser cannot play this video.</video> : message.imageData && <button className="message-photo-link" type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); openMessagePhoto(message.imageData!, message.imageName); }} aria-label={`Open ${message.imageName || "shared photo"} in a new tab`}><img className="message-photo" src={message.imageData} alt={message.imageName || "Shared photo"} /></button>}{message.body && <p>{message.body}</p>}<time className="message-full-date">{new Date(message.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</time>{Boolean(message.reactions?.length) && <div className="message-reaction-row">{message.reactions?.map((reaction) => <button className={reaction.reactedByViewer ? "mine" : ""} type="button" key={reaction.emoji} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); toggleReaction(message.id, reaction.emoji); }} aria-label={`${reaction.emoji} reaction, ${reaction.count}`}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div>}{reactionMessageId === message.id && <div className="message-reaction-picker" role="menu" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="message-reply-action" type="button" role="menuitem" onClick={() => startReply(message)} aria-label="Reply to message">Reply</button>{MESSAGE_REACTIONS.map((emoji) => <button type="button" role="menuitem" key={emoji} onClick={() => toggleReaction(message.id, emoji)} aria-label={`React with ${emoji}`}>{emoji}</button>)}</div>}{message.sentByViewer && <span className={`message-read-receipt ${readNames.length ? "read" : ""}`}>{readNames.length ? `✓✓ Read by ${readNames.length > 2 ? `${readNames.length} people` : readNames.join(", ")}` : "✓ Sent"}</span>}</div>; })}{typingSummary && active && <div className="message-typing-indicator" aria-live="polite" aria-label={typingSummary}><span className="message-sender-avatar">{conversationAvatar(active)}</span><div className="message-typing-bubble" aria-hidden="true"><span /><span /><span /></div><small>{typingSummary}</small></div>}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><div className="message-attachment-controls"><input ref={photoInputRef} className="message-photo-input" type="file" accept="image/*" onChange={chooseMessagePhoto} /><button className="message-photo-button" type="button" onClick={() => photoInputRef.current?.click()}>Photo</button></div>{replyingTo && <div className="message-composer-reply"><strong>Replying to {replyingTo.senderName}</strong><span>{replyingTo.body}</span><button type="button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply">x</button></div>}{imageData && <div className="message-photo-preview"><img src={imageData} alt={imageName || "Photo ready to send"} /><button type="button" onClick={() => { setImageData(null); setImageName(""); }} aria-label="Remove photo">x</button></div>}<textarea ref={composerRef} value={body} onChange={(event) => setBody(event.target.value)} onBlur={() => stopTyping(activeConversation)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || (!body.trim() && !imageData)}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
+  return <section className="messages-reference"><aside className="panel conversation-list"><div className="conversation-search">⌕ <input placeholder="Search messages..." /></div><div className="conversation-tabs"><button className="active" type="button">All</button><button type="button">Direct</button><button type="button">Groups</button><button type="button">Unread</button></div>{visibleConversations.map((conversation) => { const distance = swipingId === conversation.id ? gestureRef.current?.distance ?? 0 : 0; return <div className="conversation-swipe-wrap" key={conversation.id}><button className={`conversation-item ${conversation.id === activeConversation ? "active" : ""}`} style={{ transform: `translateX(${distance}px)` }} type="button" onClick={() => { if (ignoreClickRef.current) { ignoreClickRef.current = false; return; } if (!distance) { showArchived ? restoreConversation(conversation.id) : setActiveConversation(conversation.id); } }} onPointerDown={(event) => beginConversationSwipe(event, conversation.id)} onPointerMove={(event) => moveConversationSwipe(event, conversation.id)} onPointerUp={(event) => endConversationSwipe(event, conversation.id)} onPointerCancel={(event) => endConversationSwipe(event, conversation.id)} onMouseEnter={() => prefetchConversation(conversation.id)}><span className={`conversation-avatar ${isConversationOnline(conversation) ? "online" : ""}`}>{conversationAvatar(conversation)}</span><div><strong>{conversation.name}</strong><p>{conversation.preview ?? (conversation.kind === "group" ? "Group conversation" : "Direct message")}</p>{conversation.kind === "direct" && <small className="conversation-presence-label">{conversationPresenceText(conversation)}</small>}</div><time>{messageSentTime(conversation.lastMessageAt)}</time></button><span className="conversation-swipe-action">{showArchived ? "Restore" : "Archive"}</span></div>; })}<button className="conversation-archive" type="button" onClick={() => setShowArchived((value) => !value)}>▣　{showArchived ? "View active conversations" : "View archived conversations"} {showArchived ? "" : `(${conversations.filter((conversation) => conversation.archived).length})`} →</button></aside><article className="panel active-conversation"><header className="conversation-head"><div><span className={`conversation-avatar large ${isConversationOnline(active) ? "online" : ""}`}>{active ? conversationAvatar(active) : "♧"}</span><div><h3>{active?.name ?? (showArchived ? "Archived conversations" : "No conversation selected")}</h3><small className={typingSummary ? "typing-status" : undefined}>{typingSummary || (active?.kind === "group" ? `Group conversation - ${messages.length || employees.length} members` : active ? conversationPresenceText(active) : "Swipe right on a conversation to archive it")}</small></div></div></header><div className="messages-list reference-message-list" ref={listRef}><div className="message-day-divider">Today</div>{loading && active && <div className="messages-empty">Loading messages…</div>}{!loading && active && !messages.length && <div className="messages-empty"><strong>No messages yet</strong><span>Start the conversation with your team.</span></div>}{active && messages.map((message, index) => { const previousMessage = messages[index - 1]; const grouped = Boolean(previousMessage && previousMessage.senderType === message.senderType && previousMessage.senderId === message.senderId); const readNames = [...new Set((message.readBy ?? []).map((receipt) => receipt.readerName))]; const videoKey = messageVideoKey(message); return <div className={`message-bubble ${message.sentByViewer ? "mine" : ""} ${grouped ? "grouped" : ""}`} key={message.id} onPointerDown={(event) => beginReactionHold(event, message.id)} onPointerMove={moveReactionHold} onPointerUp={endReactionHold} onPointerCancel={endReactionHold} onPointerLeave={endReactionHold} onContextMenu={(event) => { event.preventDefault(); setReactionMessageId(message.id); }} title="Press and hold for message options">{!grouped && <div><span className="message-sender-avatar">{avatarFor(message.senderType === "employee" ? message.senderId : undefined, message.senderType === "owner")}</span><strong>{message.senderName}</strong>{message.senderType === "owner" && <em>Owner</em>}</div>}{message.replyTo && <div className="message-reply-quote"><strong>Replying to {message.replyTo.senderName}</strong><span>{message.replyTo.body}</span></div>}{videoKey ? <video className="message-photo" controls preload="metadata" src={messageVideoUrl(videoKey)}>Your browser cannot play this video.</video> : message.imageData && <button className="message-photo-link" type="button" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); openMessagePhoto(message.imageData!, message.imageName); }} aria-label={`Open ${message.imageName || "shared photo"} in a new tab`}><img className="message-photo" src={message.imageData} alt={message.imageName || "shared photo"} /></button>}{message.body && <p>{message.body}</p>}<time className="message-full-date">{new Date(message.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</time>{Boolean(message.reactions?.length) && <div className="message-reaction-row">{message.reactions?.map((reaction) => <button className={reaction.reactedByViewer ? "mine" : ""} type="button" key={reaction.emoji} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); toggleReaction(message.id, reaction.emoji); }} aria-label={`${reaction.emoji} reaction, ${reaction.count}`}>{reaction.emoji}<span>{reaction.count}</span></button>)}</div>}{reactionMessageId === message.id && <div className="message-reaction-picker" role="menu" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => event.stopPropagation()}><button className="message-reply-action" type="button" role="menuitem" onClick={() => startReply(message)} aria-label="Reply to message">Reply</button>{MESSAGE_REACTIONS.map((emoji) => <button type="button" role="menuitem" key={emoji} onClick={() => toggleReaction(message.id, emoji)} aria-label={`React with ${emoji}`}>{emoji}</button>)}</div>}{message.sentByViewer && <span className={`message-read-receipt ${readNames.length ? "read" : ""}`}>{message.pending ? "Sending…" : readNames.length ? `✓✓ Read by ${readNames.length > 2 ? `${readNames.length} people` : readNames.join(", ")}` : "✓ Sent"}</span>}</div>; })}{typingSummary && active && <div className="message-typing-indicator" aria-live="polite" aria-label={typingSummary}><span className="message-sender-avatar">{conversationAvatar(active)}</span><div className="message-typing-bubble" aria-hidden="true"><span /><span /><span /></div><small>{typingSummary}</small></div>}</div>{enabled && active && <form className="message-composer reference-composer" onSubmit={sendMessage}><div className="message-attachment-controls"><input ref={photoInputRef} className="message-photo-input" type="file" accept="image/*" onChange={chooseMessagePhoto} /><button className="message-photo-button" type="button" onClick={() => photoInputRef.current?.click()}>Photo</button></div>{replyingTo && <div className="message-composer-reply"><strong>Replying to {replyingTo.senderName}</strong><span>{replyingTo.body}</span><button type="button" onClick={() => setReplyingTo(null)} aria-label="Cancel reply">x</button></div>}{imageData && <div className="message-photo-preview"><img src={imageData} alt={imageName || "Photo ready to send"} /><button type="button" onClick={() => { setImageData(null); setImageName(""); }} aria-label="Remove photo">x</button></div>}<textarea ref={composerRef} value={body} onChange={(event) => setBody(event.target.value)} onBlur={() => stopTyping(activeConversation)} rows={2} maxLength={2000} placeholder={`Message ${active.name}...`} /><div><span>⌕ Attach　 GIF　☺</span><button className="primary-button" type="submit" disabled={busy || (!body.trim() && !imageData)}>➤ {busy ? "Sending…" : "Send"}</button></div></form>}{error && <p className="messages-error" role="alert">{error}</p>}</article>{composeOpen && <div className="modal-backdrop" role="presentation"><form className="modal-card message-compose-card" onSubmit={createConversation}><div className="modal-head"><div><p className="eyebrow">{viewer.access === "employee" ? "Message your team" : "Team messaging"}</p><h2>{composeMode === "group" ? "Create a group" : "New message"}</h2></div><div className="compose-mode-switch"><button className={composeMode === "direct" ? "active" : ""} type="button" onClick={() => setComposeMode("direct")}>Direct</button><button className={composeMode === "group" ? "active" : ""} type="button" onClick={() => setComposeMode("group")}>Group</button></div><button type="button" onClick={() => setComposeOpen(false)}>×</button></div>{composeMode === "group" && <label>Group name<input value={composeName} onChange={(event) => setComposeName(event.target.value)} placeholder="e.g. Friday closers" required /></label>}<div className="message-member-picker"><strong>{composeMode === "group" ? "Add members" : "Choose an employee"}</strong>{employees.map((employee) => <label key={employee.id}><input type={composeMode === "group" ? "checkbox" : "radio"} name="members" checked={composeMembers.includes(employee.id)} onChange={() => setComposeMembers((current) => composeMode === "group" ? current.includes(employee.id) ? current.filter((id) => id !== employee.id) : [...current, employee.id] : [employee.id])} />{employee.name}<small>{employee.role}</small></label>)}</div><div className="modal-actions"><button className="secondary-button" type="button" onClick={() => setComposeOpen(false)}>Cancel</button><button className="primary-button" type="submit">Start conversation</button></div></form></div>}</section>;
 }
 
 function AiAssistant({ viewer }: { viewer: Viewer }) {
@@ -3324,6 +3395,7 @@ function Profile({ employee, viewer, logOut, flash }: { employee?: Employee; vie
 }
 
 function ProfileEditor({ employee, viewer, logOut, flash }: { employee: Employee; viewer: Viewer; logOut: () => Promise<void>; flash: (message: string) => void }) {
+  const employeeNotificationPreferencesKey = `coreshift-employee-notifications:${accountStorageScope(viewer)}`;
   const [saving, setSaving] = useState(false);
   const [profilePhoto, setProfilePhoto] = useState<string | null>(null);
   const [form, setForm] = useState({
@@ -3347,14 +3419,14 @@ function ProfileEditor({ employee, viewer, logOut, flash }: { employee: Employee
     } catch { setProfilePhoto(employee.profilePhoto ?? null); }
     const savedFont = window.localStorage.getItem("coreshift-font-size") as AppFontSize | null;
     const savedZone = window.localStorage.getItem("coreshift-time-zone");
-    const savedNotifications = window.localStorage.getItem("coreshift-employee-notifications");
+    const savedNotifications = window.localStorage.getItem(employeeNotificationPreferencesKey);
     if (savedFont && ["standard", "large", "larger", "largest"].includes(savedFont)) setFontSize(savedFont);
     if (savedZone) setTimeZone(savedZone);
     if (savedNotifications) {
       try { setNotifications((current) => ({ ...current, ...JSON.parse(savedNotifications) })); } catch { /* ignore stale preference data */ }
     }
     applyAppFontSize(savedFont ?? "large");
-  }, [employee.id]);
+  }, [employee.id, employeeNotificationPreferencesKey]);
   function chooseProfilePhoto(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -3386,7 +3458,7 @@ function ProfileEditor({ employee, viewer, logOut, flash }: { employee: Employee
   function updateEmployeePreferences(next: Partial<typeof notifications>) {
     const updated = { ...notifications, ...next };
     setNotifications(updated);
-    window.localStorage.setItem("coreshift-employee-notifications", JSON.stringify(updated));
+    window.localStorage.setItem(employeeNotificationPreferencesKey, JSON.stringify(updated));
   }
   function updateEmployeeFontSize(value: AppFontSize) {
     setFontSize(value);

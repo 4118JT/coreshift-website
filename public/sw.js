@@ -1,4 +1,4 @@
-const CACHE_NAME = "coreshift-shell-v4";
+const CACHE_NAME = "coreshift-shell-v5";
 const APP_SHELL = ["/manifest.webmanifest", "/favicon.svg", "/coreshift-apple-icon.png"];
 
 self.addEventListener("install", (event) => {
