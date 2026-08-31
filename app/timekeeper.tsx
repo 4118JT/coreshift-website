@@ -2737,6 +2737,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const photoInputRef = useRef<HTMLInputElement>(null);
   const activeConversationRef = useRef(activeConversation);
+  const employeesRef = useRef(employees);
   const hydratedConversationsRef = useRef(new Set<string>());
   const messageLoadsInFlightRef = useRef(new Set<string>());
   const lastReadReceiptRef = useRef<string | null>(null);
@@ -2744,6 +2745,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const typingConversationRef = useRef<string | null>(null);
   const typingActiveRef = useRef(false);
   activeConversationRef.current = activeConversation;
+  employeesRef.current = employees;
   function sendTypingState(conversationId: string, typing: boolean) {
     fetch("/api/messages", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "typing", conversationId, typing }) }).catch(() => undefined);
   }
@@ -2886,10 +2888,10 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
         const existingIndex = merged.findIndex((conversation) => conversation.id === recent.id);
         const kind = recent.id.startsWith("group-") ? "group" as const : "direct" as const;
         const employeeId = Number(recent.id.replace("direct-", ""));
-        const employee = employees.find((person) => person.id === employeeId);
+        const employee = employeesRef.current.find((person) => person.id === employeeId);
         const fallbackName = kind === "group" ? "Group conversation" : viewer.access === "employee" ? "Owner" : employee?.name ?? recent.senderName;
         const update = { id: recent.id, name: fallbackName, kind, memberCount: kind === "group" ? 3 : 2, unread: Boolean(recent.unread), preview: `${recent.sentByViewer ? "You" : recent.senderName}: ${recent.body}`, lastMessageAt: recent.lastMessageAt };
-        if (existingIndex >= 0) merged[existingIndex] = { ...update, ...merged[existingIndex], preview: update.preview, lastMessageAt: update.lastMessageAt, unread: update.unread };
+        if (existingIndex >= 0) merged[existingIndex] = { ...merged[existingIndex], ...update, archived: merged[existingIndex].archived };
         else merged.push(update);
       }
       return merged.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || a.name.localeCompare(b.name));
