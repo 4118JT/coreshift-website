@@ -1,5 +1,6 @@
 import { database, ensureDatabase } from "../../../../db/runtime";
 import { getViewer } from "../../../../db/viewer";
+import { autoClockOutExpiredEntries } from "../../../../db/auto-clock-out";
 
 export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   const viewer = await getViewer();
@@ -7,6 +8,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     return Response.json({ error: "Owner access required" }, { status: 403 });
   }
   await ensureDatabase();
+  await autoClockOutExpiredEntries(database(), viewer.businessId);
   const { id } = await context.params;
   const employeeId = Number(id);
   if (!Number.isInteger(employeeId)) {
@@ -14,12 +16,12 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
   }
   const employee = await database().prepare(`
     SELECT id, name, role, initials, color, email, phone, display_name AS displayName,
-      availability, desired_hours AS desiredHours, address, profile_photo AS profilePhoto, hourly_rate_cents AS hourlyRateCents
+      availability, desired_hours AS desiredHours, auto_clock_out_minutes AS autoClockOutMinutes, address, profile_photo AS profilePhoto, hourly_rate_cents AS hourlyRateCents
     FROM employees WHERE id = ? AND business_id = ? AND active = 1
   `).bind(employeeId, viewer.businessId).first<{
     id: number; name: string; role: string; initials: string; color: string;
     email: string | null; phone: string | null; displayName: string | null; availability: string | null;
-    desiredHours: number; address: string | null; profilePhoto: string | null; hourlyRateCents: number;
+    desiredHours: number; autoClockOutMinutes: number | null; address: string | null; profilePhoto: string | null; hourlyRateCents: number;
   }>();
   if (!employee) return Response.json({ error: "Employee not found" }, { status: 404 });
   if (viewer.access === "employee" && viewer.employeeId !== employeeId) return Response.json({ error: "Not authorized" }, { status: 403 });
@@ -44,7 +46,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   const employeeId = Number(id);
   const body = await request.json() as {
     email?: string; phone?: string; displayName?: string; availability?: string; desiredHours?: number; address?: string; profilePhoto?: string | null;
-    hourlyRateCents?: number; role?: string;
+    hourlyRateCents?: number; role?: string; autoClockOutMinutes?: number | null;
   };
   if (!Number.isInteger(employeeId)) {
     return Response.json({ error: "A valid employee is required" }, { status: 400 });
@@ -57,8 +59,19 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
     if (typeof body.hourlyRateCents === "number" && viewer.access !== "owner") {
       return Response.json({ error: "Only an owner can change the hourly rate" }, { status: 403 });
     }
+    if (Object.prototype.hasOwnProperty.call(body, "autoClockOutMinutes") && viewer.access !== "owner") {
+      return Response.json({ error: "Only an owner can change automatic clock-out" }, { status: 403 });
+    }
     const hasProfileFields = typeof body.phone === "string" || typeof body.displayName === "string" || typeof body.availability === "string" || typeof body.address === "string" || Number.isFinite(body.desiredHours);
-    if (hasProfileFields) {
+    if (Object.prototype.hasOwnProperty.call(body, "autoClockOutMinutes")) {
+      const minutes = Number(body.autoClockOutMinutes);
+      if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1440) {
+        return Response.json({ error: "Automatic clock-out must be between 0 and 24 hours." }, { status: 400 });
+      }
+      await database().prepare(
+        "UPDATE employees SET auto_clock_out_minutes = ? WHERE id = ? AND business_id = ?"
+      ).bind(Math.round(minutes) || null, employeeId, viewer.businessId).run();
+    } else if (hasProfileFields) {
       const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : null;
       if (email !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return Response.json({ error: "A valid email is required" }, { status: 400 });
       const displayName = typeof body.displayName === "string" ? body.displayName.trim().slice(0, 80) : "";

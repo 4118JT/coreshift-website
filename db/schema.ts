@@ -27,6 +27,7 @@ export const employees = sqliteTable(
     displayName: text("display_name"),
     availability: text("availability"),
     desiredHours: integer("desired_hours").notNull().default(0),
+    autoClockOutMinutes: integer("auto_clock_out_minutes"),
     address: text("address"),
     profilePhoto: text("profile_photo"),
     accessCodeHash: text("access_code_hash"),

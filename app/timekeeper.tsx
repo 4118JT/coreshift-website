@@ -27,6 +27,7 @@ type Employee = {
   phone?: string | null;
   availability?: string | null;
   desiredHours?: number;
+  autoClockOutMinutes?: number | null;
   address?: string | null;
   profilePhoto?: string | null;
   hourlyRateCents?: number;
@@ -2352,6 +2353,8 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
   const [showAddTime, setShowAddTime] = useState(false);
   const [editingTimeEntry, setEditingTimeEntry] = useState<number | null>(null);
   const [showPayment, setShowPayment] = useState(false);
+  const [autoClockOutHours, setAutoClockOutHours] = useState("");
+  const [savingAutoClockOut, setSavingAutoClockOut] = useState(false);
 
   useEffect(() => {
     const employeeId = Number(new URLSearchParams(window.location.search).get("employee"));
@@ -2369,8 +2372,34 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
       setDetail(null);
     } else {
       setDetail(result);
+      setAutoClockOutHours(result.employee.autoClockOutMinutes ? String(result.employee.autoClockOutMinutes / 60) : "");
     }
     setDetailLoading(false);
+  }
+
+  async function saveAutoClockOut(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!detail) return;
+    const hours = Number(autoClockOutHours);
+    if (!Number.isFinite(hours) || hours < 0 || hours > 24) {
+      setDetailError("Enter a limit from 0 to 24 hours.");
+      return;
+    }
+    setSavingAutoClockOut(true);
+    const response = await fetch(`/api/employees/${detail.employee.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ autoClockOutMinutes: Math.round(hours * 60) }),
+    }).catch(() => null);
+    const result = response ? await response.json().catch(() => null) as { error?: string } | null : null;
+    setSavingAutoClockOut(false);
+    if (!response?.ok) {
+      setDetailError(result?.error ?? "Automatic clock-out could not be saved.");
+      return;
+    }
+    await loadDetail(detail.employee.id);
+    await onRecordsChanged();
+    flash(hours ? `${detail.employee.name} will clock out after ${hours} hour${hours === 1 ? "" : "s"}.` : "Automatic clock-out is off.");
   }
 
   async function saveTimeEntry(event: FormEvent<HTMLFormElement>, entryId?: number) {
@@ -2482,6 +2511,13 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
           </div>
           <p className="pay-note">Estimated earnings use the current {money(detail.employee.hourlyRateCents ?? 0)}/hour rate and recorded hours, before taxes or deductions. CoreShift records payments but does not send funds.</p>
           <div className="employee-profile-summary"><div><span>Displayed name</span><strong>{detail.employee.displayName || detail.employee.name}</strong></div><div><span>Email</span><strong>{detail.employee.email || "Not provided"}</strong></div><div><span>Phone</span><strong>{detail.employee.phone || "Not provided"}</strong></div><div><span>Desired hours</span><strong>{detail.employee.desiredHours ? `${detail.employee.desiredHours} hrs / week` : "Not provided"}</strong></div><div className="profile-summary-wide"><span>Availability</span><strong>{detail.employee.availability || "Not provided"}</strong></div><div className="profile-summary-wide"><span>Address</span><strong>{detail.employee.address || "Not provided"}</strong></div></div>
+          <form className="payment-form auto-clock-out-form" onSubmit={saveAutoClockOut}>
+            <label>Automatic clock-out after
+              <input type="number" min="0" max="24" step="0.25" value={autoClockOutHours} placeholder="Off" onChange={(event) => setAutoClockOutHours(event.target.value)} />
+            </label>
+            <p>Hours per shift. Leave blank or enter 0 to turn this rule off.</p>
+            <button className="secondary-button" type="submit" disabled={savingAutoClockOut}>{savingAutoClockOut ? "Saving…" : "Save clock rule"}</button>
+          </form>
           <div className="payment-toolbar"><div><strong>Payment history</strong><span>{detail.payments.length} recorded payments</span></div><button className="primary-button detail-add-button" type="button" onClick={() => setShowPayment(!showPayment)}>＋ Mark paid</button></div>
           {showPayment && <form className="payment-form" onSubmit={recordPayment}>
             <label>Amount paid<div className="payment-money"><span>$</span><input name="amount" type="number" min="0.01" step="0.01" defaultValue={(unpaidCents / 100).toFixed(2)} required /></div></label>

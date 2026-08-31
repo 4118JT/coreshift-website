@@ -173,6 +173,7 @@ export function ensureDatabase() {
       "ALTER TABLE employees ADD COLUMN display_name TEXT",
       "ALTER TABLE employees ADD COLUMN availability TEXT",
       "ALTER TABLE employees ADD COLUMN desired_hours INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE employees ADD COLUMN auto_clock_out_minutes INTEGER",
       "ALTER TABLE employees ADD COLUMN address TEXT",
       "ALTER TABLE employees ADD COLUMN profile_photo TEXT",
       "ALTER TABLE employees ADD COLUMN employee_code TEXT",

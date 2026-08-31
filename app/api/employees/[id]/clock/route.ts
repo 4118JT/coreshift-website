@@ -1,5 +1,6 @@
 import { database, ensureDatabase } from "../../../../../db/runtime";
 import { getViewer } from "../../../../../db/viewer";
+import { autoClockOutExpiredEntries } from "../../../../../db/auto-clock-out";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const viewer = await getViewer();
@@ -11,6 +12,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   const { id } = await context.params;
   const employeeId = Number(id);
   if (!Number.isInteger(employeeId)) return Response.json({ error: "Invalid employee" }, { status: 400 });
+  await autoClockOutExpiredEntries(db, viewer.businessId);
   if (viewer.access === "employee" && viewer.employeeId !== employeeId) {
     return Response.json({ error: "You can only update your own time" }, { status: 403 });
   }

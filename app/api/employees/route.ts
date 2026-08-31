@@ -1,6 +1,7 @@
 import { database, ensureDatabase } from "../../../db/runtime";
 import { getViewer } from "../../../db/viewer";
 import { ensureWorkspaceEightDigitCodes } from "../../../db/employee-codes";
+import { autoClockOutExpiredEntries } from "../../../db/auto-clock-out";
 
 export async function GET() {
   const viewer = await getViewer();
@@ -11,6 +12,7 @@ export async function GET() {
   const db = database();
   if (viewer.access === "owner") await ensureWorkspaceEightDigitCodes(db, viewer.businessId);
   const now = Date.now();
+  await autoClockOutExpiredEntries(db, viewer.businessId, now);
   const paySettingsRow = await db.prepare("SELECT value FROM workspace_settings WHERE key = ?").bind(`pay_settings:${viewer.businessId}`).first<{ value: string }>();
   let paySettings: { frequency?: string; payPeriod?: string; payDay?: string; payPeriodStarts?: string; overtimeEnabled?: boolean } = {};
   try { paySettings = paySettingsRow?.value ? JSON.parse(paySettingsRow.value) : {}; } catch { /* use payroll defaults */ }
@@ -39,7 +41,7 @@ export async function GET() {
   const employeeFilter = viewer.access === "employee" ? "AND e.id = ?" : "";
   const query = db.prepare(`
     SELECT e.id, e.name, e.role, e.initials, e.color, e.email, e.phone, e.display_name AS displayName,
-      e.availability, e.desired_hours AS desiredHours, e.address, e.profile_photo AS profilePhoto, e.created_at AS createdAt,
+      e.availability, e.desired_hours AS desiredHours, e.auto_clock_out_minutes AS autoClockOutMinutes, e.address, e.profile_photo AS profilePhoto, e.created_at AS createdAt,
       e.hourly_rate_cents AS hourlyRateCents,
       CASE WHEN open_entry.id IS NULL THEN 'clocked_out' ELSE 'clocked_in' END AS status,
       open_entry.clock_in AS clockInMs,
@@ -70,7 +72,7 @@ export async function GET() {
     : query.bind(weekStart, weekStart, weekStart, now, now, weekStart, now, weekStart, weekStart, monthStart, now, viewer.businessId)
   ).all<{
     id: number; name: string; role: string; initials: string; color: string; email: string | null; phone: string | null;
-    displayName: string | null; availability: string | null; desiredHours: number; address: string | null; profilePhoto: string | null; hourlyRateCents: number;
+    displayName: string | null; availability: string | null; desiredHours: number; autoClockOutMinutes: number | null; address: string | null; profilePhoto: string | null; hourlyRateCents: number;
     createdAt: number | null; status: "clocked_in" | "clocked_out"; clockInMs: number | null;
     weeklyMinutes: number; monthMinutes: number; totalMinutes: number; totalShifts: number;
   }>();
@@ -144,6 +146,7 @@ export async function GET() {
       phone: viewer.access === "owner" || viewer.employeeId === row.id ? row.phone : undefined,
       availability: viewer.access === "owner" || viewer.employeeId === row.id ? row.availability : undefined,
       desiredHours: viewer.access === "owner" || viewer.employeeId === row.id ? Math.round(row.desiredHours ?? 0) : undefined,
+      autoClockOutMinutes: viewer.access === "owner" ? row.autoClockOutMinutes : undefined,
       address: viewer.access === "owner" || viewer.employeeId === row.id ? row.address : undefined,
       profilePhoto: row.profilePhoto ?? null,
       hourlyRateCents: viewer.access === "owner" ? row.hourlyRateCents : undefined,
@@ -191,7 +194,7 @@ export async function POST(request: Request) {
     ).bind(viewer.businessId, name, role, initials, body.color ?? "green", email, hourlyRateCents, Date.now()).first<{ id: number }>();
     return Response.json({
       id: result?.id, name, displayName: null, role, initials, color: body.color ?? "green", email,
-      phone: null, availability: null, desiredHours: 0, address: null, profilePhoto: null, hourlyRateCents,
+      phone: null, availability: null, desiredHours: 0, autoClockOutMinutes: null, address: null, profilePhoto: null, hourlyRateCents,
       status: "clocked_out", clockIn: null, weeklyMinutes: 0, monthMinutes: 0,
       totalMinutes: 0, totalShifts: 0, currentPayPeriodEarningsCents: 0, createdAt: Date.now(),
     }, { status: 201 });
