@@ -150,9 +150,9 @@ export async function GET(request: Request) {
   }>();
   const dayLength = 24 * 60 * 60 * 1000;
   const dayCount = selectedEnd ? Math.max(1, Math.ceil((selectedEnd - selectedStart + 1) / dayLength)) : 7;
-  const dailyMinutesByEmployee = new Map<number, number[]>();
+  const dailyRawMinutesByEmployee = new Map<number, number[]>();
   for (const entry of dailyTimeEntries.results) {
-    const dailyMinutes = dailyMinutesByEmployee.get(entry.employeeId) ?? Array.from({ length: dayCount }, () => 0);
+    const dailyMinutes = dailyRawMinutesByEmployee.get(entry.employeeId) ?? Array.from({ length: dayCount }, () => 0);
     const entryEnd = Math.min(entry.clockOut, selectedEnd ? selectedEnd + 1 : Date.now());
     let cursor = Math.max(entry.clockIn, selectedStart);
     while (cursor < entryEnd) {
@@ -160,16 +160,28 @@ export async function GET(request: Request) {
       if (dayIndex < 0 || dayIndex >= dayCount) break;
       const dayEnd = selectedStart + (dayIndex + 1) * dayLength;
       const segmentEnd = Math.min(entryEnd, dayEnd);
-      dailyMinutes[dayIndex] += Math.max(0, Math.round((segmentEnd - cursor) / 60_000));
+      dailyMinutes[dayIndex] += Math.max(0, (segmentEnd - cursor) / 60_000);
       cursor = segmentEnd;
     }
-    dailyMinutesByEmployee.set(entry.employeeId, dailyMinutes);
+    dailyRawMinutesByEmployee.set(entry.employeeId, dailyMinutes);
+  }
+  const dailyMinutesByEmployee = new Map<number, number[]>();
+  for (const [employeeId, rawMinutes] of dailyRawMinutesByEmployee) {
+    const roundedMinutes = rawMinutes.map((minutes) => Math.round(minutes));
+    const totalMinutes = Math.round(rawMinutes.reduce((total, minutes) => total + minutes, 0));
+    const roundingDifference = totalMinutes - roundedMinutes.reduce((total, minutes) => total + minutes, 0);
+    const adjustmentIndex = rawMinutes.reduce((latest, minutes, index) => minutes > 0 ? index : latest, -1);
+    if (adjustmentIndex >= 0) roundedMinutes[adjustmentIndex] = Math.max(0, roundedMinutes[adjustmentIndex] + roundingDifference);
+    dailyMinutesByEmployee.set(employeeId, roundedMinutes);
   }
   const employeeReport = employeeHours.results.map((row) => {
-    const minutes = Math.max(0, Math.round(row.minutes));
+    // Use the same normalized day buckets that power the detail view so the
+    // displayed days always add up exactly to the payroll total.
+    const dailyMinutes = dailyMinutesByEmployee.get(row.id) ?? Array.from({ length: dayCount }, () => 0);
+    const minutes = dailyMinutes.reduce((total, dayMinutes) => total + dayMinutes, 0);
     const earned = Math.round((minutes / 60) * row.hourlyRateCents);
     const paid = paidByEmployee.get(row.id) ?? 0;
-    return { id: row.id, name: row.name, role: row.role, initials: row.initials, color: row.color, hourlyRateCents: row.hourlyRateCents, minutes, dailyMinutes: dailyMinutesByEmployee.get(row.id) ?? Array.from({ length: dayCount }, () => 0), earnedCents: earned, paidCents: paid, owedCents: Math.max(0, earned - paid) };
+    return { id: row.id, name: row.name, role: row.role, initials: row.initials, color: row.color, hourlyRateCents: row.hourlyRateCents, minutes, dailyMinutes, earnedCents: earned, paidCents: paid, owedCents: Math.max(0, earned - paid) };
   });
 
   return Response.json({
