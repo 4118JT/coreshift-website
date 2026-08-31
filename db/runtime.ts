@@ -174,12 +174,21 @@ export function ensureDatabase() {
       "ALTER TABLE employees ADD COLUMN availability TEXT",
       "ALTER TABLE employees ADD COLUMN desired_hours INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE employees ADD COLUMN auto_clock_out_minutes INTEGER",
+      "ALTER TABLE employees ADD COLUMN auto_clock_out_starts_at INTEGER",
       "ALTER TABLE employees ADD COLUMN address TEXT",
       "ALTER TABLE employees ADD COLUMN profile_photo TEXT",
       "ALTER TABLE employees ADD COLUMN employee_code TEXT",
     ]) {
       try { await db.prepare(statement).run(); } catch { /* already migrated */ }
     }
+    // Existing limits begin with the first runtime that supports this rule, so
+    // no punch that started earlier can be changed retroactively.
+    await db.prepare(`
+      UPDATE employees
+      SET auto_clock_out_starts_at = ?
+      WHERE COALESCE(auto_clock_out_minutes, 0) > 0
+        AND auto_clock_out_starts_at IS NULL
+    `).bind(Date.now()).run();
   })();
   return ready;
 }

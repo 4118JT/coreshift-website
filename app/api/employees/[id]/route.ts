@@ -69,8 +69,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
         return Response.json({ error: "Automatic clock-out must be between 0 and 24 hours." }, { status: 400 });
       }
       await database().prepare(
-        "UPDATE employees SET auto_clock_out_minutes = ? WHERE id = ? AND business_id = ?"
-      ).bind(Math.round(minutes) || null, employeeId, viewer.businessId).run();
+        "UPDATE employees SET auto_clock_out_minutes = ?, auto_clock_out_starts_at = ? WHERE id = ? AND business_id = ?"
+      ).bind(Math.round(minutes) || null, minutes ? Date.now() : null, employeeId, viewer.businessId).run();
     } else if (hasProfileFields) {
       const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : null;
       if (email !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return Response.json({ error: "A valid email is required" }, { status: 400 });

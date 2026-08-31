@@ -2513,7 +2513,7 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
           <div className="employee-profile-summary"><div><span>Displayed name</span><strong>{detail.employee.displayName || detail.employee.name}</strong></div><div><span>Email</span><strong>{detail.employee.email || "Not provided"}</strong></div><div><span>Phone</span><strong>{detail.employee.phone || "Not provided"}</strong></div><div><span>Desired hours</span><strong>{detail.employee.desiredHours ? `${detail.employee.desiredHours} hrs / week` : "Not provided"}</strong></div><div className="profile-summary-wide"><span>Availability</span><strong>{detail.employee.availability || "Not provided"}</strong></div><div className="profile-summary-wide"><span>Address</span><strong>{detail.employee.address || "Not provided"}</strong></div></div>
           <form className="shift-limit-card" onSubmit={saveAutoClockOut}>
             <span className="shift-limit-icon" aria-hidden="true">◷</span>
-            <div className="shift-limit-copy"><strong>Maximum shift length</strong><span>CoreShift clocks out this employee when the limit is reached.</span></div>
+            <div className="shift-limit-copy"><strong>Maximum shift length</strong><span>Applies only to shifts clocked in after you save this limit.</span></div>
             <label className="shift-limit-input"><span>Hours</span><div><input type="number" min="0" max="24" step="0.25" value={autoClockOutHours} placeholder="Off" onChange={(event) => setAutoClockOutHours(event.target.value)} /><em>hrs</em></div></label>
             <button className="primary-button" type="submit" disabled={savingAutoClockOut}>{savingAutoClockOut ? "Saving…" : "Save limit"}</button>
           </form>
