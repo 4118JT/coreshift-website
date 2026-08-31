@@ -2512,11 +2512,11 @@ function Team({ employees, toggleClock, setShowAddEmployee, updateEmployeeEmail,
           <p className="pay-note">Estimated earnings use the current {money(detail.employee.hourlyRateCents ?? 0)}/hour rate and recorded hours, before taxes or deductions. CoreShift records payments but does not send funds.</p>
           <div className="employee-profile-summary"><div><span>Displayed name</span><strong>{detail.employee.displayName || detail.employee.name}</strong></div><div><span>Email</span><strong>{detail.employee.email || "Not provided"}</strong></div><div><span>Phone</span><strong>{detail.employee.phone || "Not provided"}</strong></div><div><span>Desired hours</span><strong>{detail.employee.desiredHours ? `${detail.employee.desiredHours} hrs / week` : "Not provided"}</strong></div><div className="profile-summary-wide"><span>Availability</span><strong>{detail.employee.availability || "Not provided"}</strong></div><div className="profile-summary-wide"><span>Address</span><strong>{detail.employee.address || "Not provided"}</strong></div></div>
           <form className="payment-form auto-clock-out-form" onSubmit={saveAutoClockOut}>
-            <label>Automatic clock-out after
+            <label>Maximum shift length
               <input type="number" min="0" max="24" step="0.25" value={autoClockOutHours} placeholder="Off" onChange={(event) => setAutoClockOutHours(event.target.value)} />
             </label>
-            <p>Hours per shift. Leave blank or enter 0 to turn this rule off.</p>
-            <button className="secondary-button" type="submit" disabled={savingAutoClockOut}>{savingAutoClockOut ? "Saving…" : "Save clock rule"}</button>
+            <p>Automatically clock out at this many hours. Leave blank or enter 0 to turn it off.</p>
+            <button className="secondary-button" type="submit" disabled={savingAutoClockOut}>{savingAutoClockOut ? "Saving…" : "Save shift limit"}</button>
           </form>
           <div className="payment-toolbar"><div><strong>Payment history</strong><span>{detail.payments.length} recorded payments</span></div><button className="primary-button detail-add-button" type="button" onClick={() => setShowPayment(!showPayment)}>＋ Mark paid</button></div>
           {showPayment && <form className="payment-form" onSubmit={recordPayment}>
