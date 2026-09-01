@@ -507,6 +507,8 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   const knownNotificationIdsRef = useRef(new Set<string>());
   const loadedNotificationsRef = useRef(false);
   const notificationLoadInFlightRef = useRef(false);
+  const unreadMessagesInFlightRef = useRef(false);
+  const employeesRefreshInFlightRef = useRef(false);
   const working = useMemo(() => employees.filter((person) => person.status === "clocked_in"), [employees]);
   // Keep the employee clock usable during the brief API load (and on slower
   // mobile connections) by using the signed-in employee identity immediately.
@@ -653,8 +655,8 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     channel?.addEventListener("message", refreshFromNewMessage);
     window.addEventListener("focus", refreshNotifications);
     document.addEventListener("visibilitychange", refreshWhenVisible);
-    const notificationTimer = window.setInterval(loadNotifications, 10000);
-    const dataTimer = window.setInterval(() => refreshEmployees(), 30000);
+    const notificationTimer = window.setInterval(loadNotifications, 30_000);
+    const dataTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refreshEmployees(); }, 45_000);
     return () => {
       window.clearInterval(timer);
       window.clearInterval(notificationTimer);
@@ -669,15 +671,23 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   useEffect(() => {
     if (!messagingAllowed) { setUnreadMessages(0); return; }
     const loadUnreadMessages = async () => {
-      const response = await fetch("/api/messages?list=1", { cache: "no-store" }).catch(() => null);
-      const result = response?.ok ? await response.json().catch(() => null) as { recentConversations?: Array<{ id: string; unread?: number | boolean }> } | null : null;
-      if (!result?.recentConversations) return;
-      setUnreadMessages(result.recentConversations.reduce((total, conversation) => total + Math.max(0, Number(conversation.unread) || 0), 0));
+      if (document.visibilityState === "hidden" || unreadMessagesInFlightRef.current) return;
+      unreadMessagesInFlightRef.current = true;
+      try {
+        const response = await fetch("/api/messages?list=1", { cache: "no-store" }).catch(() => null);
+        const result = response?.ok ? await response.json().catch(() => null) as { recentConversations?: Array<{ id: string; unread?: number | boolean }> } | null : null;
+        if (!result?.recentConversations) return;
+        setUnreadMessages(result.recentConversations.reduce((total, conversation) => total + Math.max(0, Number(conversation.unread) || 0), 0));
+      } finally {
+        unreadMessagesInFlightRef.current = false;
+      }
     };
     loadUnreadMessages();
-    const timer = window.setInterval(loadUnreadMessages, 2000);
-    window.addEventListener("focus", loadUnreadMessages);
-    return () => { window.clearInterval(timer); window.removeEventListener("focus", loadUnreadMessages); };
+    const refreshWhenVisible = () => { if (document.visibilityState === "visible") void loadUnreadMessages(); };
+    const timer = window.setInterval(loadUnreadMessages, 15_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", refreshWhenVisible); document.removeEventListener("visibilitychange", refreshWhenVisible); };
   }, [messagingAllowed, viewer.businessId, viewer.actorId]);
   useEffect(() => {
     if (!messagingAllowed || typeof BroadcastChannel === "undefined") return;
@@ -742,10 +752,13 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
 
   function refreshEmployees() {
     if (isDemo) return Promise.resolve();
-    return fetch("/api/employees")
+    if (employeesRefreshInFlightRef.current) return Promise.resolve();
+    employeesRefreshInFlightRef.current = true;
+    return fetch("/api/employees", { cache: "no-store" })
       .then((response) => response.ok ? response.json() : Promise.reject())
       .then((data: Employee[]) => setEmployees(data.map((person) => ({ ...person, clockInTimestamp: person.clockIn ? new Date(person.clockIn).getTime() : null, clockIn: person.clockIn ? (formatClockTime(new Date(person.clockIn))) : null }))))
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => { employeesRefreshInFlightRef.current = false; });
   }
 
   async function logOut() {
@@ -2775,6 +2788,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   const employeesRef = useRef(employees);
   const hydratedConversationsRef = useRef(new Set<string>());
   const messageLoadsInFlightRef = useRef(new Set<string>());
+  const recentConversationsInFlightRef = useRef(false);
   const lastReadReceiptRef = useRef<string | null>(null);
   const typingTimeoutRef = useRef<number | null>(null);
   const typingConversationRef = useRef<string | null>(null);
@@ -2913,6 +2927,9 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     }));
   }, []);
   async function loadRecentConversations() {
+    if (document.visibilityState === "hidden" || recentConversationsInFlightRef.current) return;
+    recentConversationsInFlightRef.current = true;
+    try {
     const response = await fetch("/api/messages?list=1", { cache: "no-store" }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as { recentConversations?: Array<{ id: string; senderType: "owner" | "employee"; senderId: number; senderName: string; body: string; lastMessageAt: number; unread: number | boolean; sentByViewer: boolean }>; onlinePeople?: Array<{ userType: "owner" | "employee"; userId: number; userName: string; lastSeen: number }> } | null : null;
     if (!response?.ok || !result?.recentConversations) return;
@@ -2931,6 +2948,9 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
       }
       return merged.sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0) || a.name.localeCompare(b.name));
     });
+    } finally {
+      recentConversationsInFlightRef.current = false;
+    }
   }
   async function loadMessages() {
     const conversationId = activeConversationRef.current;
@@ -2946,7 +2966,7 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
     }
     const response = await fetch(`/api/messages?conversationId=${encodeURIComponent(conversationId)}&refresh=${Date.now()}`, { cache: "no-store" }).catch(() => null);
     const result = response ? await response.json().catch(() => null) as { enabled?: boolean; messages?: WorkspaceMessage[]; typingPeople?: Array<{ userType: "owner" | "employee"; userId: number; userName: string; lastSeen: number }> } | null : null;
-    if (!response?.ok) { messageLoadsInFlightRef.current.delete(conversationId); setError("Messages could not be loaded."); return; }
+    if (!response?.ok) { messageLoadsInFlightRef.current.delete(conversationId); setLoading(false); setError("Messages could not be loaded. Retrying shortly…"); return; }
     if (activeConversationRef.current !== conversationId) { messageLoadsInFlightRef.current.delete(conversationId); return; }
     setEnabled(result?.enabled !== false); setMessages(result?.messages ?? []); setTypingPeople(result?.typingPeople ?? []); setLoading(false);
     const latest = result?.messages?.at(-1);
@@ -2974,27 +2994,21 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   useEffect(() => {
     const refreshVisibleMessages = () => { if (document.visibilityState === "visible") loadMessages(); };
     loadMessages();
-    const timer = window.setInterval(refreshVisibleMessages, 1500);
+    const timer = window.setInterval(refreshVisibleMessages, 8_000);
     window.addEventListener("focus", refreshVisibleMessages);
     document.addEventListener("visibilitychange", refreshVisibleMessages);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", refreshVisibleMessages); document.removeEventListener("visibilitychange", refreshVisibleMessages); };
   }, []);
-  useEffect(() => { loadRecentConversations(); const timer = window.setInterval(loadRecentConversations, 3000); return () => window.clearInterval(timer); }, []);
+  useEffect(() => { const refreshWhenVisible = () => { if (document.visibilityState === "visible") void loadRecentConversations(); }; void loadRecentConversations(); const timer = window.setInterval(loadRecentConversations, 12_000); window.addEventListener("focus", refreshWhenVisible); document.addEventListener("visibilitychange", refreshWhenVisible); return () => { window.clearInterval(timer); window.removeEventListener("focus", refreshWhenVisible); document.removeEventListener("visibilitychange", refreshWhenVisible); }; }, []);
   useEffect(() => {
     const heartbeat = () => fetch("/api/messages", { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "presence" }) }).catch(() => undefined);
     const refreshWhenVisible = () => { if (document.visibilityState === "visible") heartbeat(); };
     heartbeat();
-    const timer = window.setInterval(heartbeat, 20_000);
+    const timer = window.setInterval(heartbeat, 30_000);
     window.addEventListener("focus", heartbeat);
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", heartbeat); document.removeEventListener("visibilitychange", refreshWhenVisible); };
   }, []);
-  useEffect(() => {
-    const start = () => conversations.forEach((conversation) => prefetchConversation(conversation.id));
-    const requestIdle = (window as Window & { requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number }).requestIdleCallback;
-    const idle = requestIdle ? requestIdle(start, { timeout: 1200 }) : window.setTimeout(start, 800);
-    return () => { if (typeof idle === "number") window.clearTimeout(idle); };
-  }, [conversations.length]);
   useEffect(() => { if (listRef.current) listRef.current.scrollTo({ top: listRef.current.scrollHeight, behavior: "smooth" }); }, [messages.length, typingPeople.length]);
   useEffect(() => {
     const receipts = listRef.current?.querySelectorAll<HTMLElement>(".message-read-receipt");
