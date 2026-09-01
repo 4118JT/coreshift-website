@@ -2444,6 +2444,8 @@ html[data-theme="dark"] .product-content .panel-head h3,html[data-theme="dark"] 
   font-size:17px;
   font-weight:800;
 }
+.messages-reference .conversation-avatar.online{position:relative;overflow:visible}
+.messages-reference .conversation-avatar.online::after{content:"";position:absolute;right:-2px;bottom:-2px;width:11px;height:11px;border:2px solid #fff;border-radius:50%;background:#24b46b;box-shadow:0 1px 4px rgba(17,104,61,.35)}
 .messages-reference .conversation-item.active .conversation-avatar{
   border-color:#cfc5fb;
   background:linear-gradient(145deg,#e9e3ff,#dcd2ff);
