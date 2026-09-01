@@ -103,7 +103,7 @@ export default function PersistentPayHistoryView({ currentPayPeriod, currentPeri
       const response = await fetch(`/api/reports/expenses?${query}`, { cache: "no-store" });
       const payload = await response.json().catch(() => null) as ReportPayload & { error?: string } | null;
       if (!response.ok) throw new Error(payload?.error ?? "Pay history could not be loaded.");
-      const rows = (payload?.selected?.employeeReport ?? []).filter((row) => row.minutes > 0 || row.paidCents > 0).map((row) => {
+      const rows = (payload?.selected?.employeeReport ?? []).filter((row) => row.minutes > 0).map((row) => {
         const totalMinutes = Math.max(0, Math.round(row.minutes));
         const regularMinutes = Math.min(totalMinutes, periodDays === 14 ? 4800 : 2400);
         const overtimeMinutes = Math.max(0, totalMinutes - regularMinutes);
