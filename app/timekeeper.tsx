@@ -587,8 +587,9 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     const initialDark = savedTheme === "dark";
     setDarkMode(initialDark);
     document.documentElement.dataset.theme = initialDark ? "dark" : "light";
-    setPhoneNotificationsEnabled(window.localStorage.getItem(phoneNotificationKey) === "true");
-    setPhoneNotificationPermission("Notification" in window ? Notification.permission : "unsupported");
+    const notificationPermission = "Notification" in window ? Notification.permission : "unsupported";
+    setPhoneNotificationsEnabled(notificationPermission === "granted" && window.localStorage.getItem(phoneNotificationKey) !== "false");
+    setPhoneNotificationPermission(notificationPermission);
     const savedFontSize = window.localStorage.getItem("coreshift-font-size") as AppFontSize | null;
     if (savedFontSize && ["standard", "large", "larger", "largest"].includes(savedFontSize)) applyAppFontSize(savedFontSize);
     window.setTimeout(() => applyAppFontSize((window.localStorage.getItem("coreshift-font-size") as AppFontSize) || "large"), 0);
@@ -655,7 +656,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     channel?.addEventListener("message", refreshFromNewMessage);
     window.addEventListener("focus", refreshNotifications);
     document.addEventListener("visibilitychange", refreshWhenVisible);
-    const notificationTimer = window.setInterval(loadNotifications, 30_000);
+    const notificationTimer = window.setInterval(loadNotifications, 15_000);
     const dataTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refreshEmployees(); }, 45_000);
     return () => {
       window.clearInterval(timer);
@@ -3094,14 +3095,24 @@ function Messages({ viewer, employees }: { viewer: Viewer; employees: Employee[]
   }
   async function sendMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault(); if ((!body.trim() && !imageData && !videoKey) || busy) return;
-    const outgoing = { body, imageData, imageName, videoKey, videoName, conversationId: activeConversation, replyTo: replyingTo };
+    const clientMessageId = `m_${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID().replaceAll("-", "") : `${Date.now()}_${Math.random().toString(36).slice(2)}`}`;
+    const outgoing = { body, imageData, imageName, videoKey, videoName, conversationId: activeConversation, replyTo: replyingTo, clientMessageId };
     const temporaryId = -Date.now();
     const optimistic: WorkspaceMessage = { id: temporaryId, conversationId: outgoing.conversationId, senderType: viewer.access === "employee" ? "employee" : "owner", senderId: viewer.actorId, senderName: viewer.displayName, body: outgoing.body.trim(), imageData: outgoing.videoKey ? `video:${outgoing.videoKey}` : outgoing.imageData, imageName: outgoing.imageData ? outgoing.imageName : outgoing.videoKey ? outgoing.videoName : null, createdAt: Date.now(), sentByViewer: true, pending: true, replyTo: outgoing.replyTo ? { id: outgoing.replyTo.id, senderName: outgoing.replyTo.senderName, body: outgoing.replyTo.body } : null };
     setBusy(true); setError("");
     setMessages((current) => [...current, optimistic]);
     setConversations((current) => current.map((conversation) => conversation.id === outgoing.conversationId ? { ...conversation, preview: messagePreview(optimistic, viewer.access), lastMessageAt: optimistic.createdAt } : conversation));
     setBody(""); setImageData(null); setImageName(""); setVideoKey(null); setVideoName(""); setReplyingTo(null);
-    const response = await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ body: outgoing.body, imageData: outgoing.imageData, imageName: outgoing.imageName, videoKey: outgoing.videoKey, videoName: outgoing.videoName, conversationId: outgoing.conversationId, replyToId: outgoing.replyTo?.id }) }).catch(() => null);
+    const sendAttempt = async () => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 12_000);
+      try {
+        return await fetch("/api/messages", { method: "POST", headers: { "content-type": "application/json" }, signal: controller.signal, body: JSON.stringify({ body: outgoing.body, imageData: outgoing.imageData, imageName: outgoing.imageName, videoKey: outgoing.videoKey, videoName: outgoing.videoName, conversationId: outgoing.conversationId, replyToId: outgoing.replyTo?.id, clientMessageId: outgoing.clientMessageId }) });
+      } catch { return null; }
+      finally { window.clearTimeout(timeout); }
+    };
+    let response = await sendAttempt();
+    if (!response || response.status >= 500) response = await sendAttempt();
     const result = response ? await response.json().catch(() => null) as WorkspaceMessage & { error?: string } | null : null;
     setBusy(false);
     if (!response?.ok || !result) {

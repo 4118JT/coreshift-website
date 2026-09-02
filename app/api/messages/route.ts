@@ -98,7 +98,7 @@ export async function POST(request: Request) {
   const { viewer, enabled } = await access();
   if (viewer.access === "pending") return Response.json({ error: "Not authorized" }, { status: 403 });
   if (!enabled) return Response.json({ error: "Messaging is disabled by the owner." }, { status: 403 });
-  const body = await request.json() as { body?: string; imageData?: string; imageName?: string; videoKey?: string; videoName?: string; conversationId?: string; replyToId?: number };
+  const body = await request.json() as { body?: string; imageData?: string; imageName?: string; videoKey?: string; videoName?: string; conversationId?: string; replyToId?: number; clientMessageId?: string };
   const message = body.body?.trim().slice(0, 2000);
   const rawImageData = body.imageData?.trim();
   const imageData = rawImageData && rawImageData.length <= 1_800_000 && /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(rawImageData) ? rawImageData : null;
@@ -115,13 +115,27 @@ export async function POST(request: Request) {
   const senderId = viewer.actorId;
   const createdAt = Date.now();
   const conversationId = body.conversationId?.trim().slice(0, 120) || "managers";
+  const requestedClientMessageId = body.clientMessageId?.trim();
+  const clientMessageId = requestedClientMessageId && /^[A-Za-z0-9_-]{12,120}$/.test(requestedClientMessageId) ? requestedClientMessageId : null;
+  if (requestedClientMessageId && !clientMessageId) return Response.json({ error: "Invalid message identifier. Please try again." }, { status: 400 });
   if (!canAccessConversation(viewer, conversationId)) return Response.json({ error: "Not authorized for this conversation." }, { status: 403 });
   const requestedReplyId = Number(body.replyToId);
   const replyTo = Number.isInteger(requestedReplyId) && requestedReplyId > 0
     ? await database().prepare("SELECT id, sender_name AS senderName, body FROM messages WHERE id = ? AND business_id = ? AND conversation_id = ?").bind(requestedReplyId, viewer.businessId, conversationId).first<{ id: number; senderName: string; body: string }>()
     : null;
-  const result = await database().prepare("INSERT INTO messages (business_id, conversation_id, sender_type, sender_id, sender_name, body, image_data, image_name, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(viewer.businessId, conversationId, senderType, senderId, viewer.displayName, message ?? "", storedMedia, imageName, replyTo?.id ?? null, createdAt).first<{ id: number }>();
-  return Response.json({ id: result?.id, conversationId, senderType, senderId, senderName: viewer.displayName, body: message ?? "", imageData: storedMedia, imageName, replyTo: replyTo ? { id: replyTo.id, senderName: replyTo.senderName, body: replyTo.body || "Photo" } : null, createdAt, sentByViewer: true }, { status: 201 });
+  let messageId: number | undefined;
+  if (clientMessageId) {
+    // A retry can arrive after the first request was saved but before its
+    // response reached the phone. Keep one durable message for that action.
+    await database().prepare("INSERT OR IGNORE INTO messages (business_id, conversation_id, sender_type, sender_id, sender_name, body, image_data, image_name, reply_to_id, client_message_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(viewer.businessId, conversationId, senderType, senderId, viewer.displayName, message ?? "", storedMedia, imageName, replyTo?.id ?? null, clientMessageId, createdAt).run();
+    const saved = await database().prepare("SELECT id FROM messages WHERE business_id = ? AND conversation_id = ? AND sender_type = ? AND sender_id = ? AND client_message_id = ? LIMIT 1").bind(viewer.businessId, conversationId, senderType, senderId, clientMessageId).first<{ id: number }>();
+    messageId = saved?.id;
+  } else {
+    const result = await database().prepare("INSERT INTO messages (business_id, conversation_id, sender_type, sender_id, sender_name, body, image_data, image_name, reply_to_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id").bind(viewer.businessId, conversationId, senderType, senderId, viewer.displayName, message ?? "", storedMedia, imageName, replyTo?.id ?? null, createdAt).first<{ id: number }>();
+    messageId = result?.id;
+  }
+  if (!messageId) return Response.json({ error: "Message could not be saved. Please try again." }, { status: 503 });
+  return Response.json({ id: messageId, conversationId, senderType, senderId, senderName: viewer.displayName, body: message ?? "", imageData: storedMedia, imageName, replyTo: replyTo ? { id: replyTo.id, senderName: replyTo.senderName, body: replyTo.body || "Photo" } : null, createdAt, sentByViewer: true }, { status: 201 });
 }
 
 export async function PATCH(request: Request) {

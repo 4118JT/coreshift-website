@@ -110,6 +110,7 @@ export function ensureDatabase() {
         sender_id INTEGER NOT NULL DEFAULT 0,
         sender_name TEXT NOT NULL,
         body TEXT NOT NULL,
+        client_message_id TEXT,
         created_at INTEGER NOT NULL
       )`),
       db.prepare(`CREATE TABLE IF NOT EXISTS message_reactions (
@@ -168,6 +169,7 @@ export function ensureDatabase() {
       "ALTER TABLE messages ADD COLUMN reply_to_id INTEGER REFERENCES messages(id)",
       "ALTER TABLE messages ADD COLUMN image_data TEXT",
       "ALTER TABLE messages ADD COLUMN image_name TEXT",
+      "ALTER TABLE messages ADD COLUMN client_message_id TEXT",
       "ALTER TABLE message_presence ADD COLUMN conversation_id TEXT",
       "ALTER TABLE message_presence ADD COLUMN typing_until INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE employees ADD COLUMN display_name TEXT",
@@ -181,6 +183,7 @@ export function ensureDatabase() {
     ]) {
       try { await db.prepare(statement).run(); } catch { /* already migrated */ }
     }
+    await db.prepare("CREATE UNIQUE INDEX IF NOT EXISTS messages_sender_client_idx ON messages(business_id, conversation_id, sender_type, sender_id, client_message_id) WHERE client_message_id IS NOT NULL").run();
     // Existing limits begin with the first runtime that supports this rule, so
     // no punch that started earlier can be changed retroactively.
     await db.prepare(`
