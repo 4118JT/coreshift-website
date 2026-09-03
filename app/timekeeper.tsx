@@ -594,9 +594,10 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     if (savedFontSize && ["standard", "large", "larger", "largest"].includes(savedFontSize)) applyAppFontSize(savedFontSize);
     window.setTimeout(() => applyAppFontSize((window.localStorage.getItem("coreshift-font-size") as AppFontSize) || "large"), 0);
     setIsInstalled(window.matchMedia("(display-mode: standalone)").matches || Boolean((navigator as Navigator & { standalone?: boolean }).standalone));
-    const timer = window.setInterval(() => setNow(new Date()), 1000);
+    // The UI only shows minute-level time. Updating the entire app every
+    // second made heavier pages feel slow, especially on phones.
+    const timer = window.setInterval(() => setNow(new Date()), 30_000);
     refreshEmployees();
-    if (!isEmployee) fetch("/api/settings/employee-join-code").then((response) => response.ok ? response.json() as Promise<{ code: string | null }> : Promise.reject()).then((result) => setEmployeeJoinCode(result.code)).catch(() => {});
     loadedNotificationsRef.current = false;
     knownNotificationIdsRef.current = new Set();
     const loadNotifications = async () => {
@@ -630,7 +631,9 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
         notificationLoadInFlightRef.current = false;
       }
     };
-    loadNotifications();
+    // Let the first screen and team data settle before loading nonessential
+    // alerts. New messages still refresh immediately through BroadcastChannel.
+    const initialNotificationLoad = window.setTimeout(() => { void loadNotifications(); }, 900);
     // A message sent from another open CoreShift session is checked straight
     // away; polling remains the fallback for different devices.
     const channel = typeof BroadcastChannel === "undefined" ? null : new BroadcastChannel(`coreshift-messages:${viewer.businessId}`);
@@ -656,10 +659,11 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     channel?.addEventListener("message", refreshFromNewMessage);
     window.addEventListener("focus", refreshNotifications);
     document.addEventListener("visibilitychange", refreshWhenVisible);
-    const notificationTimer = window.setInterval(loadNotifications, 15_000);
+    const notificationTimer = window.setInterval(loadNotifications, 30_000);
     const dataTimer = window.setInterval(() => { if (document.visibilityState === "visible") void refreshEmployees(); }, 45_000);
     return () => {
       window.clearInterval(timer);
+      window.clearTimeout(initialNotificationLoad);
       window.clearInterval(notificationTimer);
       window.clearInterval(dataTimer);
       channel?.removeEventListener("message", refreshFromNewMessage);
@@ -670,7 +674,7 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
   }, [accountScope, employeeNotificationPreferencesKey, isEmployee, phoneNotificationKey, viewer.access, viewer.businessId, viewer.employeeId]);
 
   useEffect(() => {
-    if (!messagingAllowed) { setUnreadMessages(0); return; }
+    if (!messagingAllowed || view === "messages") { setUnreadMessages(0); return; }
     const loadUnreadMessages = async () => {
       if (document.visibilityState === "hidden" || unreadMessagesInFlightRef.current) return;
       unreadMessagesInFlightRef.current = true;
@@ -689,7 +693,14 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     window.addEventListener("focus", refreshWhenVisible);
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => { window.clearInterval(timer); window.removeEventListener("focus", refreshWhenVisible); document.removeEventListener("visibilitychange", refreshWhenVisible); };
-  }, [messagingAllowed, viewer.businessId, viewer.actorId]);
+  }, [messagingAllowed, view, viewer.businessId, viewer.actorId]);
+  useEffect(() => {
+    if (isEmployee || !showAddEmployee || employeeJoinCode) return;
+    fetch("/api/settings/employee-join-code", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() as Promise<{ code: string | null }> : Promise.reject())
+      .then((result) => setEmployeeJoinCode(result.code))
+      .catch(() => undefined);
+  }, [employeeJoinCode, isEmployee, showAddEmployee]);
   useEffect(() => {
     if (!messagingAllowed || typeof BroadcastChannel === "undefined") return;
     const channel = new BroadcastChannel(`coreshift-messages:${viewer.businessId}`);

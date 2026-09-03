@@ -1,6 +1,5 @@
 import { database, ensureDatabase } from "../../../db/runtime";
 import { getViewer } from "../../../db/viewer";
-import { ensureWorkspaceEightDigitCodes } from "../../../db/employee-codes";
 import { autoClockOutExpiredEntries } from "../../../db/auto-clock-out";
 
 export async function GET() {
@@ -10,7 +9,6 @@ export async function GET() {
   }
   await ensureDatabase();
   const db = database();
-  if (viewer.access === "owner") await ensureWorkspaceEightDigitCodes(db, viewer.businessId);
   const now = Date.now();
   await autoClockOutExpiredEntries(db, viewer.businessId, now);
   const paySettingsRow = await db.prepare("SELECT value FROM workspace_settings WHERE key = ?").bind(`pay_settings:${viewer.businessId}`).first<{ value: string }>();
