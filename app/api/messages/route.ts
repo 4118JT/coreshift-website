@@ -1,4 +1,5 @@
 import { database, ensureDatabase, mediaBucket } from "../../../db/runtime";
+import { sendMessagePushes } from "../../../db/push";
 import { getViewer } from "../../../db/viewer";
 
 async function access() {
@@ -135,6 +136,10 @@ export async function POST(request: Request) {
     messageId = result?.id;
   }
   if (!messageId) return Response.json({ error: "Message could not be saved. Please try again." }, { status: 503 });
+  // Web Push is delivered by Android/iOS even after CoreShift's page has been
+  // suspended. Delivery failure never prevents the already-saved message from
+  // reaching the recipient the next time they open the app.
+  await sendMessagePushes({ businessId: viewer.businessId, senderType, senderId, senderName: viewer.displayName, conversationId, messageId, body: message ?? "", hasMedia: Boolean(storedMedia) });
   return Response.json({ id: messageId, conversationId, senderType, senderId, senderName: viewer.displayName, body: message ?? "", imageData: storedMedia, imageName, replyTo: replyTo ? { id: replyTo.id, senderName: replyTo.senderName, body: replyTo.body || "Photo" } : null, createdAt, sentByViewer: true }, { status: 201 });
 }
 

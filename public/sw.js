@@ -1,4 +1,4 @@
-const CACHE_NAME = "coreshift-shell-v5";
+const CACHE_NAME = "coreshift-shell-v6";
 const APP_SHELL = ["/manifest.webmanifest", "/favicon.svg", "/coreshift-apple-icon.png"];
 
 self.addEventListener("install", (event) => {
@@ -33,5 +33,22 @@ self.addEventListener("notificationclick", (event) => {
       if (existing) return existing.focus();
       return self.clients.openWindow(href);
     }),
+  );
+});
+
+// Push events are delivered by the phone's notification service, even when
+// CoreShift is closed or the browser has suspended its background tabs.
+self.addEventListener("push", (event) => {
+  const fallback = { title: "CoreShift", body: "You have a new update.", href: "/" };
+  const payload = event.data ? event.data.json().catch(() => fallback) : Promise.resolve(fallback);
+  event.waitUntil(
+    payload.then((message) => self.registration.showNotification(message.title || fallback.title, {
+      body: message.body || fallback.body,
+      icon: "/icon-192.png",
+      badge: "/icon-192.png",
+      tag: message.tag || `coreshift-${Date.now()}`,
+      renotify: false,
+      data: { href: message.href || fallback.href },
+    })),
   );
 });

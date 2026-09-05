@@ -561,17 +561,28 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     }
     if (!phoneNotificationsAvailable) { flash("Phone notifications are not available on this device."); return; }
     if (phoneNotificationPermission === "denied") { flash("Phone notifications are blocked in your browser settings."); return; }
-    if ("serviceWorker" in navigator) await navigator.serviceWorker.register("/sw.js").catch(() => null);
+    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.register("/sw.js?v=6").catch(() => null) : null;
     const permission = phoneNotificationPermission === "granted" ? "granted" : await Notification.requestPermission().catch(() => "denied" as NotificationPermission);
     setPhoneNotificationPermission(permission);
     if (permission !== "granted") { flash("Phone notifications were not enabled."); return; }
+    const setup = await fetch("/api/push", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null) as { enabled?: boolean; publicKey?: string | null } | null;
+    if (!registration || !setup?.enabled || !setup.publicKey) { flash("Phone alerts are still being set up. Please try again shortly."); return; }
+    const decodeKey = (value: string) => Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4)), (character) => character.charCodeAt(0));
+    const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeKey(setup.publicKey) }).catch(() => null);
+    if (!subscription || !(await fetch("/api/push", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(subscription) })).ok) { flash("Phone alerts could not be connected. Please try again."); return; }
     window.localStorage.setItem(phoneNotificationKey, "true");
     setPhoneNotificationsEnabled(true);
-    flash("Phone notifications are on for new messages.");
+    flash("Phone notifications are on, even when CoreShift is closed.");
   }
-  function disablePhoneNotifications() {
+  async function disablePhoneNotifications() {
     window.localStorage.setItem(phoneNotificationKey, "false");
     setPhoneNotificationsEnabled(false);
+    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.ready.catch(() => null) : null;
+    const subscription = await registration?.pushManager.getSubscription().catch(() => null);
+    if (subscription) {
+      await fetch("/api/push", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ endpoint: subscription.endpoint }) }).catch(() => undefined);
+      await subscription.unsubscribe().catch(() => false);
+    }
     flash("Phone notifications are off.");
   }
   useEffect(() => {
@@ -590,6 +601,19 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     const notificationPermission = "Notification" in window ? Notification.permission : "unsupported";
     setPhoneNotificationsEnabled(notificationPermission === "granted" && window.localStorage.getItem(phoneNotificationKey) !== "false");
     setPhoneNotificationPermission(notificationPermission);
+    // A prior permission grant needs one server registration after an app
+    // update or a restored phone. This is silent: it never opens a prompt.
+    if (notificationPermission === "granted" && window.localStorage.getItem(phoneNotificationKey) !== "false" && "serviceWorker" in navigator) {
+      void (async () => {
+        const setup = await fetch("/api/push", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null) as { enabled?: boolean; publicKey?: string | null } | null;
+        if (!setup?.enabled || !setup.publicKey) return;
+        const registration = await navigator.serviceWorker.ready.catch(() => null);
+        if (!registration) return;
+        const decodeKey = (value: string) => Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4)), (character) => character.charCodeAt(0));
+        const subscription = await registration.pushManager.getSubscription().catch(() => null) ?? await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeKey(setup.publicKey) }).catch(() => null);
+        if (subscription) await fetch("/api/push", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(subscription) }).catch(() => undefined);
+      })();
+    }
     const savedFontSize = window.localStorage.getItem("coreshift-font-size") as AppFontSize | null;
     if (savedFontSize && ["standard", "large", "larger", "largest"].includes(savedFontSize)) applyAppFontSize(savedFontSize);
     window.setTimeout(() => applyAppFontSize((window.localStorage.getItem("coreshift-font-size") as AppFontSize) || "large"), 0);

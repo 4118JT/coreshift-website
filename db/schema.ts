@@ -101,3 +101,18 @@ export const loginAttempts = sqliteTable("login_attempts", {
   windowStart: integer("window_start").notNull(),
   lockedUntil: integer("locked_until").notNull().default(0),
 });
+
+export const pushSubscriptions = sqliteTable(
+  "push_subscriptions",
+  {
+    endpoint: text("endpoint").primaryKey(),
+    businessId: text("business_id").notNull().references(() => businesses.id),
+    userType: text("user_type").notNull(),
+    userId: integer("user_id").notNull(),
+    p256dh: text("p256dh").notNull(),
+    auth: text("auth").notNull(),
+    createdAt: integer("created_at").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (table) => [index("push_subscriptions_recipient_idx").on(table.businessId, table.userType, table.userId)],
+);

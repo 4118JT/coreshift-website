@@ -7,7 +7,7 @@ export function PwaRegister() {
     if ("serviceWorker" in navigator) {
       // Keep the existing worker alive. Unregistering it on every app visit can
       // leave a short period with no active notification provider.
-      navigator.serviceWorker.register("/sw.js?v=5")
+      navigator.serviceWorker.register("/sw.js?v=6")
         .catch(() => undefined);
     }
   }, []);
