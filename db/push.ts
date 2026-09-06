@@ -1,4 +1,5 @@
 import { database } from "./runtime";
+import { env } from "cloudflare:workers";
 
 export type PushSubscriptionRecord = {
   endpoint: string;
@@ -41,8 +42,16 @@ async function hkdf(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, length:
 }
 
 function vapidKeys() {
-  const publicKey = process.env.VAPID_PUBLIC_KEY?.trim();
-  const privateKey = process.env.VAPID_PRIVATE_KEY?.trim();
+  // Production settings are supplied as Cloudflare Worker bindings. Reading
+  // process.env works in a local Node preview but leaves these values empty
+  // after deployment.
+  const runtimeEnv = env as typeof env & {
+    VAPID_PUBLIC_KEY?: string;
+    VAPID_PRIVATE_KEY?: string;
+    VAPID_SUBJECT?: string;
+  };
+  const publicKey = runtimeEnv.VAPID_PUBLIC_KEY?.trim();
+  const privateKey = runtimeEnv.VAPID_PRIVATE_KEY?.trim();
   return publicKey && privateKey ? { publicKey, privateKey } : null;
 }
 
@@ -61,7 +70,8 @@ async function vapidAuthorization(endpoint: string, publicKey: string, privateKe
   if (privateBytes.length !== 32) throw new Error("Invalid VAPID private key");
   const header = base64UrlEncode(encoder.encode(JSON.stringify({ typ: "JWT", alg: "ES256" })));
   const audience = new URL(endpoint).origin;
-  const payload = base64UrlEncode(encoder.encode(JSON.stringify({ aud: audience, exp: Math.floor(Date.now() / 1000) + 12 * 60 * 60, sub: process.env.VAPID_SUBJECT || "mailto:notifications@coreshift.app" })));
+  const runtimeEnv = env as typeof env & { VAPID_SUBJECT?: string };
+  const payload = base64UrlEncode(encoder.encode(JSON.stringify({ aud: audience, exp: Math.floor(Date.now() / 1000) + 12 * 60 * 60, sub: runtimeEnv.VAPID_SUBJECT || "mailto:notifications@coreshift.app" })));
   const key = await crypto.subtle.importKey("jwk", {
     kty: "EC", crv: "P-256", d: privateKey,
     x: base64UrlEncode(publicBytes.slice(1, 33)),
