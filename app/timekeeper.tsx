@@ -561,13 +561,24 @@ export function Timekeeper({ view = "overview", viewer }: { view?: ViewName; vie
     }
     if (!phoneNotificationsAvailable) { flash("Phone notifications are not available on this device."); return; }
     if (phoneNotificationPermission === "denied") { flash("Phone notifications are blocked in your browser settings."); return; }
-    const registration = "serviceWorker" in navigator ? await navigator.serviceWorker.register("/sw.js?v=6").catch(() => null) : null;
+    const registration = "serviceWorker" in navigator
+      ? await navigator.serviceWorker.register("/sw.js?v=7").then(async (worker) => {
+        await worker.update().catch(() => undefined);
+        return navigator.serviceWorker.ready.catch(() => worker);
+      }).catch(() => null)
+      : null;
     const permission = phoneNotificationPermission === "granted" ? "granted" : await Notification.requestPermission().catch(() => "denied" as NotificationPermission);
     setPhoneNotificationPermission(permission);
     if (permission !== "granted") { flash("Phone notifications were not enabled."); return; }
     const setup = await fetch("/api/push", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).catch(() => null) as { enabled?: boolean; publicKey?: string | null } | null;
-    if (!registration || !setup?.enabled || !setup.publicKey) { flash("Phone alerts are still being set up. Please try again shortly."); return; }
+    if (!registration) { flash("CoreShift could not start phone alerts in this browser. Reload the app and try again."); return; }
+    if (!setup?.enabled || !setup.publicKey) { flash("Phone alerts are temporarily unavailable. Please try again shortly."); return; }
     const decodeKey = (value: string) => Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4)), (character) => character.charCodeAt(0));
+    // A subscription made before the server's signing key was repaired cannot
+    // be reused. Clear it before creating the current subscription so a phone
+    // recovers automatically instead of getting stuck in setup.
+    const existingSubscription = await registration.pushManager.getSubscription().catch(() => null);
+    if (existingSubscription) await existingSubscription.unsubscribe().catch(() => false);
     const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: decodeKey(setup.publicKey) }).catch(() => null);
     if (!subscription || !(await fetch("/api/push", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(subscription) })).ok) { flash("Phone alerts could not be connected. Please try again."); return; }
     window.localStorage.setItem(phoneNotificationKey, "true");
