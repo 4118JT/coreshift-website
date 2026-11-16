@@ -3916,11 +3916,23 @@ function Settings({ flash, businessName, ownerName, ownerEmail }: { flash: (mess
   const [rounding, setRounding] = useState("Exact time");
   const [timeFormat, setTimeFormat] = useState<"24" | "12">("24");
   const [fontSize, setFontSize] = useState<AppFontSize>("large");
-  const [section, setSection] = useState<SettingsSection>("general");
+  const [section, setSection] = useState<SettingsSection>(() => {
+    if (typeof window === "undefined") return "general";
+    const requested = new URLSearchParams(window.location.search).get("section");
+    const sections: SettingsSection[] = ["general", "time", "access", "owners", "notifications", "billing", "scheduling", "pay", "locations", "integrations", "security"];
+    return sections.includes(requested as SettingsSection) ? requested as SettingsSection : "general";
+  });
   const [editingSetting, setEditingSetting] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
   const [organizationDraft, setOrganizationDraft] = useState({ name: businessName || "Main Street Café", address: "123 Main Street\nLeague City, TX 77573", email: "hello@mainstreetcafe.com", timeZone: "Central Time (CT)", industry: "Food & Beverage", companySize: "Team workspace", weekStarts: "Sunday" });
   useEffect(() => { const params = new URLSearchParams(window.location.search); if (params.get("section") === "integrations") setSection("integrations"); const connected = params.get("integration_connected"); const error = params.get("integration_error"); if (connected) flash(`${connected} connected successfully.`); if (error) flash(error); if (connected || error) window.history.replaceState({}, "", window.location.pathname); }, []);
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.pathname.endsWith("/settings")) return;
+    if (section === "general") url.searchParams.delete("section");
+    else url.searchParams.set("section", section);
+    window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [section]);
   useEffect(() => {
     if (editingSetting !== "organization-info") return;
     const timer = window.setTimeout(() => {
