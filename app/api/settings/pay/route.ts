@@ -16,6 +16,7 @@ const defaults = {
   differentRates: true,
   individualRates: true,
   payPeriodStarts: "Sunday",
+  payPeriodStartDate: "",
   currency: "USD ($)",
   timeZone: "Central Time (CT)",
   doubleTimeThreshold: "12",
@@ -56,6 +57,9 @@ export async function PATCH(request: Request) {
   const allowed = new Set(Object.keys(defaults));
   const updates = Object.fromEntries(Object.entries(body.settings).filter(([name, value]) => allowed.has(name) && (typeof value === "string" || typeof value === "boolean")));
   const settings = { ...defaults, ...stored, ...updates };
+  if (settings.payPeriodStartDate && !/^\d{4}-\d{2}-\d{2}$/.test(String(settings.payPeriodStartDate))) {
+    return Response.json({ error: "Choose a valid pay-period start date." }, { status: 400 });
+  }
   if (String(settings.payPeriod).startsWith("Biweekly") || settings.frequency === "Biweekly") {
     settings.frequency = "Biweekly";
     settings.payPeriod = "Biweekly (Sunday - Saturday)";

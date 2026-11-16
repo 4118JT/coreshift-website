@@ -19,6 +19,7 @@ type PaySettings = {
   differentRates: boolean;
   individualRates: boolean;
   payPeriodStarts: string;
+  payPeriodStartDate: string;
   currency: string;
   timeZone: string;
   doubleTimeThreshold: string;
@@ -50,6 +51,7 @@ const defaults: PaySettings = {
   differentRates: true,
   individualRates: true,
   payPeriodStarts: "Sunday",
+  payPeriodStartDate: "",
   currency: "USD ($)",
   timeZone: "Central Time (CT)",
   doubleTimeThreshold: "12",
@@ -135,6 +137,15 @@ export default function PersistentPayOvertimeSettingsPage({ flash, onNavigate }:
     void saveSettings(settingsRef.current, true);
   }
 
+  const payPeriodDays = settings.frequency === "Biweekly" ? 14 : settings.frequency === "Semi-monthly" ? 15 : settings.frequency === "Monthly" ? 30 : 7;
+  const nextPeriod = settings.payPeriodStartDate ? new Date(`${settings.payPeriodStartDate}T12:00:00`) : null;
+  if (nextPeriod) nextPeriod.setDate(nextPeriod.getDate() + payPeriodDays);
+  function markNextPayPeriod() {
+    if (!nextPeriod) { setError("Choose the exact first day before marking the next pay period."); return; }
+    update("payPeriodStartDate", nextPeriod.toISOString().slice(0, 10));
+    flash("Next pay period marked.");
+  }
+
   const nav: Array<[string, string, SettingsTarget]> = [
     ["O", "Organization", "general"], ["B", "Billing & Subscription", "billing"], ["L", "Locations", "general"],
     ["R", "Roles & Permissions", "access"], ["T", "Time & Attendance", "time"], ["S", "Scheduling", "scheduling"],
@@ -155,10 +166,12 @@ export default function PersistentPayOvertimeSettingsPage({ flash, onNavigate }:
       <section className="pay-settings-card"><h2>Company Pay Settings</h2><div className="pay-settings-grid">
         <label>Default Pay Frequency<select value={settings.frequency} onChange={(event) => update("frequency", event.target.value)} disabled={!loaded}><option>Weekly</option><option>Biweekly</option><option>Semi-monthly</option><option>Monthly</option></select></label>
         <label>Pay Period Starts<select value={settings.payPeriodStarts} onChange={(event) => update("payPeriodStarts", event.target.value)} disabled={!loaded}><option>Sunday</option><option>Monday</option><option>Saturday</option></select></label>
+        <label>Exact pay period start date<input type="date" value={settings.payPeriodStartDate} onChange={(event) => update("payPeriodStartDate", event.target.value)} disabled={!loaded} /></label>
         <label>Pay Day<select value={settings.payDay} onChange={(event) => update("payDay", event.target.value)} disabled={!loaded}>{["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((day) => <option key={day}>{day}</option>)}</select></label>
         <label>Default Currency<select value={settings.currency} onChange={(event) => update("currency", event.target.value)} disabled={!loaded}><option>USD ($)</option><option>CAD ($)</option><option>EUR</option></select></label>
         <label>Time Zone<select value={settings.timeZone} onChange={(event) => update("timeZone", event.target.value)} disabled={!loaded}><option>Central Time (CT)</option><option>Eastern Time (ET)</option><option>Mountain Time (MT)</option><option>Pacific Time (PT)</option></select></label>
       </div></section>
+      <section className="pay-settings-card"><h2>Pay-period pattern</h2><div className="pay-settings-grid"><div className="pay-note"><strong>Next pay period</strong><br />{nextPeriod ? nextPeriod.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }) : "Choose an exact start date above."}<br /><small>Repeats every {payPeriodDays} days based on the selected frequency.</small></div><div><button className="secondary-button" type="button" onClick={markNextPayPeriod} disabled={!loaded || saving || !nextPeriod}>Mark next pay period</button></div></div></section>
       <section className="pay-settings-card"><h2>Pay Settings</h2><div className="pay-settings-grid">
         <label>Default Pay Period<select value={settings.payPeriod} onChange={(event) => update("payPeriod", event.target.value)} disabled={!loaded}><option>Weekly (Sunday - Saturday)</option><option>Biweekly (Sunday - Saturday)</option><option>Semi-monthly</option><option>Monthly</option></select></label>
         <label>Rounding<select value={settings.rounding} onChange={(event) => update("rounding", event.target.value)} disabled={!loaded}><option>Exact time</option><option>5 minutes (0.08)</option><option>15 minutes (0.25)</option><option>30 minutes (0.5)</option></select></label>

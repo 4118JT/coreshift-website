@@ -12,7 +12,7 @@ export async function GET() {
   const now = Date.now();
   await autoClockOutExpiredEntries(db, viewer.businessId, now);
   const paySettingsRow = await db.prepare("SELECT value FROM workspace_settings WHERE key = ?").bind(`pay_settings:${viewer.businessId}`).first<{ value: string }>();
-  let paySettings: { frequency?: string; payPeriod?: string; payDay?: string; payPeriodStarts?: string; overtimeEnabled?: boolean } = {};
+  let paySettings: { frequency?: string; payPeriod?: string; payDay?: string; payPeriodStarts?: string; payPeriodStartDate?: string; overtimeEnabled?: boolean } = {};
   try { paySettings = paySettingsRow?.value ? JSON.parse(paySettingsRow.value) : {}; } catch { /* use payroll defaults */ }
   const storedPeriod = String(paySettings.payPeriod ?? "");
   const payFrequency = storedPeriod.startsWith("Biweekly") || paySettings.frequency === "Biweekly" ? "Biweekly" : "Weekly";
@@ -21,8 +21,17 @@ export async function GET() {
   const payPeriodStartDay = Math.max(0, weekdayNames.indexOf(paySettings.payPeriodStarts ?? "Sunday"));
   const payPeriodStartDate = new Date(now);
   payPeriodStartDate.setHours(0, 0, 0, 0);
-  payPeriodStartDate.setDate(payPeriodStartDate.getDate() - ((payPeriodStartDate.getDay() - payPeriodStartDay + 7) % 7));
-  if (payPeriodDays === 14) payPeriodStartDate.setDate(payPeriodStartDate.getDate() - 7);
+  const exactStart = typeof paySettings.payPeriodStartDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(paySettings.payPeriodStartDate)
+    ? new Date(`${paySettings.payPeriodStartDate}T00:00:00`)
+    : null;
+  if (exactStart && !Number.isNaN(exactStart.getTime())) {
+    const cycle = payPeriodDays * 24 * 60 * 60 * 1000;
+    const currentCycle = Math.floor((payPeriodStartDate.getTime() - exactStart.getTime()) / cycle);
+    payPeriodStartDate.setTime(exactStart.getTime() + currentCycle * cycle);
+  } else {
+    payPeriodStartDate.setDate(payPeriodStartDate.getDate() - ((payPeriodStartDate.getDay() - payPeriodStartDay + 7) % 7));
+    if (payPeriodDays === 14) payPeriodStartDate.setDate(payPeriodStartDate.getDate() - 7);
+  }
   const currentPayPeriodStart = payPeriodStartDate.getTime();
   const currentPayPeriodEndExclusive = currentPayPeriodStart + payPeriodDays * 24 * 60 * 60 * 1000;
   const currentPayPeriodEnd = currentPayPeriodEndExclusive - 1;
